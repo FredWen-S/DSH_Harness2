@@ -1,0 +1,81 @@
+--- a/evaluation/judge.py
++++ b/evaluation/judge.py
+@@ -30,6 +30,8 @@
+ def _detect_provider(model: str) -> str:
+     """Return 'vertex-anthropic', 'anthropic', 'google', 'openai', or 'mistral'."""
+     name = model.lower()
++    if name.startswith("compat/"):
++        return "compat"
+     if name.startswith("vertex/gemini"):
+         return "vertex-google"
+     if name.startswith("vertex/"):
+@@ -57,8 +59,22 @@
+         self.provider = _detect_provider(model)
+         # 'vertex/claude-opus-4-8' -> API model id 'claude-opus-4-8'. The bare
+         # id is what lands in scores_<model>.json filenames, so keep it clean.
+-        self.model = model.split("/", 1)[1] if self.provider.startswith("vertex-") else model
+-        if self.provider == "vertex-anthropic":
++        self.model = (
++            model.split("/", 1)[1]
++            if self.provider.startswith("vertex-") or self.provider == "compat"
++            else model
++        )
++        if self.provider == "compat":
++            # Any OpenAI-compatible chat endpoint: base URL, key and extra headers
++            # come from the environment, so no credential is written to disk here.
++            self.client = openai.OpenAI(
++                base_url=os.environ["HARNESS2_JUDGE_BASE_URL"],
++                api_key=os.environ["HARNESS2_JUDGE_API_KEY"],
++                default_headers=json.loads(os.environ.get("HARNESS2_JUDGE_HEADERS") or "{}"),
++                max_retries=5,
++                timeout=900.0,
++            )
++        elif self.provider == "vertex-anthropic":
+             # Claude on Vertex via ADC — no API key. Anthropic models on
+             # Vertex are served from the global endpoint.
+             self.client = anthropic.AnthropicVertex(
+@@ -103,6 +119,8 @@
+             Parsed JSON dict from the judge's response.
+         """
+         prompt = prompt_template.format(**variables)
++        if self.provider == "compat":
++            return self._evaluate_compat(prompt, temperature, _retries)
+         if self.provider == "vertex-anthropic":
+             return self._evaluate_anthropic_vertex(prompt, _retries)
+         if self.provider == "anthropic":
+@@ -275,6 +293,35 @@
+             try:
+                 return self._parse_json(text)
+             except (ValueError, json.JSONDecodeError) as e:
++                last_err = e
++        raise ValueError(
++            f"Judge returned unparseable response after {_retries} attempts: {last_err}"
++        )
++
++    def _evaluate_compat(self, prompt: str, temperature: float, _retries: int) -> dict:
++        """Chat Completions with JSON mode; the last attempt drops the constraint."""
++        last_err: Exception | None = None
++        for attempt in range(_retries):
++            kwargs = {
++                "model": self.model,
++                "messages": [
++                    {"role": "system", "content": self._VERTEX_SYSTEM},
++                    {"role": "user", "content": prompt},
++                ],
++                "temperature": temperature,
++                "max_tokens": 16384,
++            }
++            if attempt < _retries - 1:
++                kwargs["response_format"] = {"type": "json_object"}
++            try:
++                response = self.client.chat.completions.create(**kwargs)
++            except Exception as e:
++                last_err = e
++                continue
++            text = (response.choices[0].message.content or "") if response.choices else ""
++            try:
++                return self._parse_json(text)
++            except (ValueError, json.JSONDecodeError) as e:
+                 last_err = e
+         raise ValueError(
+             f"Judge returned unparseable response after {_retries} attempts: {last_err}"
