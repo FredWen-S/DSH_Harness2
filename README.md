@@ -28,7 +28,10 @@
 > ```
 >
 > **Status: engineering port, not yet a validated reproduction.** No improvement over the
-> base harness is claimed. Known differences from the paper's setup: no c8 (DSH cannot load
+> base harness is claimed. A first LAB pilot (one employment-law task, k=1) ran the full
+> method on DSH end to end — all three stages edited the harness and reflection stored a
+> lesson — and scored 35/41 for both the base harness and the refined one; the same base
+> harness has scored between 31 and 35 across runs, so one task cannot show an effect. Known differences from the paper's setup: no c8 (DSH cannot load
 > per-run tool-loop middleware), subagents are role prompts rather than presets, executor and
 > improver share one model, and the LAB judge is an OpenCode Go model rather than the
 > paper's Vertex judge, so scores are not comparable with the paper's tables. DSH's Windows
