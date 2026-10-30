@@ -963,7 +963,7 @@ class LabAdapter:
             + DSH_ENV_DELTA.replace("{shell}", DSH_SHELL_TOOL),
             encoding="utf-8",
         )
-        env = self.substrate.run_env(_dsh_lab_env(), staged, self.model)
+        env = self.substrate.run_env(_dsh_lab_env(), staged, self.model, self.solver_effort)
         prompt = (
             f"=== WORKSPACE ===\n{workspace}\n\n"
             f"=== DOCUMENTS (read-only) ===\n{docs}\n\n"

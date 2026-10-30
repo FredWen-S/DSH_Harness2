@@ -330,7 +330,13 @@ class Proposer:
             "Read MISSION.md first. Do what it asks. Reply with the requested output as "
             "your final message AND save it verbatim to output/answer.md."
         )
-        env = DSH.dsh_env(self.env(), agents_home=home, skills_dir=None, model=self.spec.model)
+        env = DSH.dsh_env(
+            self.env(),
+            agents_home=home,
+            skills_dir=None,
+            model=self.spec.model,
+            effort=self.spec.effort or "high",
+        )
         stream = cwd / ".h2" / DSH.STREAM_NAME
         rc, _, tail = DSH.run_headless(prompt, cwd, env, stream, timeout=wall)
         if self.audit_dir and stream.is_file():
