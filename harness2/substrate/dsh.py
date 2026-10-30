@@ -231,6 +231,8 @@ def forbidden_needles(extra: tuple[str, ...] = ()) -> list[str]:
 def forbidden_touches(path: Path, needles: list[str]) -> list[str]:
     """Tool calls or results in a stream that mention a forbidden path (case-insensitive).
 
+    Needles should be absolute directory paths; separators are normalised on both sides.
+
     DSH's Windows sandbox leaves reads unconfined, so ground truth on the host is reachable;
     this is the detection that stands in for a read boundary.
     """

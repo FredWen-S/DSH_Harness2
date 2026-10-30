@@ -523,10 +523,14 @@ def _parser_root() -> Path:
 
 
 def _forbidden_needles() -> list[str]:
-    """Paths whose appearance in a DSH tool call means ground truth or judge output."""
-    tasks = config.lab_repo() / "tasks"
+    """Directories whose appearance in a DSH tool call means ground truth or judge output:
+    the benchmark checkout (every task's criteria) and the runs root (every verdict).
+
+    Paths, never bare file names: the LAB base prompt itself mentions `task.json`, so a name
+    match flags every improver that reads the harness it is editing.
+    """
     return DSH.forbidden_needles(
-        (str(tasks), tasks.as_posix(), "task.json", "scores.json", "judge.log", "scores_")
+        tuple(str(Path(d).resolve()) for d in (config.lab_repo(), config.RUNS))
     )
 
 
