@@ -541,13 +541,15 @@ def _parser_root() -> Path:
 
 def _forbidden_needles() -> list[str]:
     """Directories whose appearance in a DSH tool call means ground truth or judge output:
-    the benchmark checkout (every task's criteria) and the runs root (every verdict).
+    the checkout's `tasks/` (every task's criteria) and the runs root (every verdict).
 
     Paths, never bare file names: the LAB base prompt itself mentions `task.json`, so a name
-    match flags every improver that reads the harness it is editing.
+    match flags every improver that reads the harness it is editing. Not the whole checkout:
+    the LAB interpreter (and the pandoc it bundles) lives in its `.venv`, so a rollout that
+    prints `sys.executable` would be flagged, and an improver reading that transcript discarded.
     """
     return DSH.forbidden_needles(
-        tuple(str(Path(d).resolve()) for d in (config.lab_repo(), config.RUNS))
+        tuple(str(Path(d).resolve()) for d in (config.lab_repo() / "tasks", config.RUNS))
     )
 
 

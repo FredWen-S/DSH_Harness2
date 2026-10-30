@@ -293,9 +293,12 @@ def dsh_env(
     `effort` is the reasoning effort DSH validates against the model (DeepSeek V4 Pro on
     OpenCode Go accepts `high`). DSH has no per-run step cap, so `ChannelSpec.steps` has no
     counterpart here.
+
+    `HARNESS2_*` variables stay with the harness: the forbidden-path list names where ground
+    truth lives, and an agent that lists its environment would read it.
     """
     provider, name = split_model(model)
-    env = dict(base_env)
+    env = {k: v for k, v in base_env.items() if not k.upper().startswith("HARNESS2_")}
     env["DSH_AGENTS_HOME"] = str(agents_home)
     if skills_dir is not None:
         env["H2_SKILLS_DIR"] = str(skills_dir)

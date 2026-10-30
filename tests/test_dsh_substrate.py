@@ -254,6 +254,16 @@ class DshIsolationTests(unittest.TestCase):
             ["MCP client 'mcp-reason-network' is enabled in the effective DSH config"],
         )
 
+    def test_harness_variables_do_not_reach_the_agent(self):
+        env = DSH.dsh_env(
+            {"PATH": "p", "HARNESS2_DSH_FORBIDDEN": "C:/x/tasks", "harness2_judge_api_key": "k"},
+            agents_home=Path("a"),
+            skills_dir=None,
+            model="deepseek-official/deepseek-v4-pro",
+        )
+        self.assertEqual(env["PATH"], "p")
+        self.assertFalse([k for k in env if k.upper().startswith("HARNESS2_")])
+
     def test_forbidden_paths_are_found_in_calls_and_results(self):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)

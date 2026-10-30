@@ -17,7 +17,8 @@
 Each (task, seed) is one pair: the unmodified harness and the selected Harness² final on
 the same task, scored by the same judge. Reports the per-pair differences, their mean with
 a percentile-bootstrap 95% interval, an exact two-sided sign test, any ground-truth access,
-and rollout token totals priced at the given per-1M rates.
+and token totals priced at the given per-1M rates, for rollouts and for the improver
+sessions (editors, composer, reflection) whose streams the proposer keeps under `_audit`.
 
     python scripts/aggregate_seeds.py --namespaces lab-dsh-agg1-s1 lab-dsh-agg1-s2 lab-dsh-agg1-s3
 """
@@ -32,12 +33,28 @@ from math import comb
 from pathlib import Path
 
 from harness2 import config
+from harness2.substrate import dsh as DSH
 
 
 def _frac(s: dict | None) -> float | None:
     if not s or not s.get("n_criteria"):
         return None
     return s["n_passed"] / s["n_criteria"]
+
+
+def _cost(usage: dict, price) -> float:
+    a, c, o = price
+    return (usage["input"] * a + usage["cache_read"] * c + usage["output"] * o) / 1e6
+
+
+def _improver_usage(ns: str) -> tuple[dict, int]:
+    usage, streams = {"input": 0, "cache_read": 0, "output": 0}, 0
+    for f in sorted((config.RUNS / "lab" / "adapt" / "_audit" / ns / "dsh-streams").glob("*.jsonl")):
+        u = DSH.token_usage(f)
+        for k in usage:
+            usage[k] += u[k]
+        streams += 1
+    return usage, streams
 
 
 def _sign_test(diffs: list[float]) -> float:
@@ -69,7 +86,9 @@ def main(argv=None) -> int:
     )
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args(argv)
-    pairs, usage, judges, flagged = [], {"input": 0, "cache_read": 0, "output": 0}, set(), []
+    pairs, judges, flagged = [], set(), []
+    usage = {"input": 0, "cache_read": 0, "output": 0}
+    imp_usage, imp_streams = {"input": 0, "cache_read": 0, "output": 0}, 0
     for ns in args.namespaces:
         path = config.RUNS / "lab" / "adapt" / ns / "base_vs_final.json"
         if not path.is_file():
@@ -79,6 +98,10 @@ def main(argv=None) -> int:
         judges.add(data.get("judge"))
         for k in usage:
             usage[k] += data["rollout_usage"][k]
+        u, n = _improver_usage(ns)
+        imp_streams += n
+        for k in imp_usage:
+            imp_usage[k] += u[k]
         for row in data["rows"]:
             final = row["finals"].get("agg") or {}
             b, f = _frac(row["base"]), _frac(final.get("score"))
@@ -104,7 +127,7 @@ def main(argv=None) -> int:
     for x in done:
         tag = " (base tree)" if x["final_is_base_tree"] else ""
         print(
-            f"{x['task'][:58]:58s} {x['namespace'][-6:]:18s} {x['base']:.3f}  "
+            f"{x['task'][:58]:58s} {x['namespace']:18s} {x['base']:.3f}  "
             f"{x['final']:.3f}  {x['final'] - x['base']:+.3f}{tag}"
         )
     summary = {"judge": judges.pop(), "pairs": pairs, "n_scored": len(done)}
@@ -127,15 +150,17 @@ def main(argv=None) -> int:
             f"W/L/T {summary['wins']}/{summary['losses']}/{summary['ties']}  "
             f"sign p={summary['sign_test_p']:.3f}"
         )
-    a, c, o = args.price
     summary["rollout_usage"] = usage
-    summary["rollout_cost_usd"] = (
-        usage["input"] * a + usage["cache_read"] * c + usage["output"] * o
-    ) / 1e6
+    summary["rollout_cost_usd"] = _cost(usage, args.price)
+    summary["improver_usage"] = {**imp_usage, "streams": imp_streams}
+    summary["improver_cost_usd"] = _cost(imp_usage, args.price)
+    summary["total_cost_usd"] = summary["rollout_cost_usd"] + summary["improver_cost_usd"]
     summary["forbidden_access"] = flagged
     print(
-        f"rollout tokens {usage}  ~${summary['rollout_cost_usd']:.2f}  "
-        f"forbidden access: {flagged or 'none'}"
+        f"rollout tokens {usage}  ~${summary['rollout_cost_usd']:.2f}\n"
+        f"improver tokens {imp_usage} ({imp_streams} sessions)  "
+        f"~${summary['improver_cost_usd']:.2f}\n"
+        f"total ~${summary['total_cost_usd']:.2f}  forbidden access: {len(flagged)} flag(s)"
     )
     out = args.out or config.RUNS / "lab" / "adapt" / "aggregate.json"
     out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
