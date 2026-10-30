@@ -43,12 +43,15 @@ def check(adapter, *, judge=False) -> list[str]:
             errors.append(f"{label}: {type(exc).__name__}; see README.md")
             return False
 
-    for validate in (
-        lambda: config.validate_models(judge=judge),
-        adapter.tasks,
-        OpencodeSubstrate().preflight,
-        adapter.preflight,
-    ):
+    # The DSH cell names its own provider/model ids and needs no OpenCode checkout.
+    dsh = getattr(adapter.substrate, "name", "") == "dsh"
+    checks = [adapter.tasks, adapter.preflight]
+    if not dsh:
+        checks[1:1] = [OpencodeSubstrate().preflight]
+        checks.insert(0, lambda: config.validate_models(judge=judge))
+    elif judge and not config.JUDGE_MODEL:
+        errors.append("HARNESS2_JUDGE_MODEL is required for judging (e.g. compat/gpt-6-luna)")
+    for validate in checks:
         try:
             validate()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -57,7 +60,7 @@ def check(adapter, *, judge=False) -> list[str]:
     bench = adapter.spec.name.split("-", 1)[0]
     name = {"jb": "job-bench-eval", "lab": "harvey-labs", "wb": "workbuddy-bench"}[bench]
     repo = config.DEPENDENCIES / name
-    for dependency in (name, "opencode"):
+    for dependency in (name,) if dsh else (name, "opencode"):
         target = config.DEPENDENCIES / dependency
         if (target / ".git").exists():
             try:
@@ -74,17 +77,29 @@ def check(adapter, *, judge=False) -> list[str]:
             f"{dependency} patch",
             ["git", "-C", target, "apply", "--reverse", "--check", patch],
         )
-    if not (config.OPENCODE_DIR / "node_modules").is_dir():
+    if not dsh and not (config.OPENCODE_DIR / "node_modules").is_dir():
         errors.append(f"OpenCode dependencies missing; run harness2-setup {bench}")
 
-    if any(
-        m.startswith("google-vertex") for m in (config.SOLVER_MODEL_OC, config.IMPROVER_MODEL)
+    if (
+        not dsh
+        and any(
+            m.startswith("google-vertex") for m in (config.SOLVER_MODEL_OC, config.IMPROVER_MODEL)
+        )
     ) or (judge and (bench == "wb" or config.JUDGE_MODEL.startswith(("claude", "gemini")))):
         probe(
             "Google Application Default Credentials",
             ["gcloud", "auth", "application-default", "print-access-token"],
         )
-    if bench == "lab":
+    if bench == "lab" and dsh:
+        # pandoc may be the LAB venv's bundled binary, which adapter.preflight checked.
+        if not shutil.which("pdftoppm"):
+            errors.append("pdftoppm missing; install poppler-utils (README.md)")
+        probe(
+            "LAB document and judge dependencies",
+            [config.LAB_PYTHON, "-c", "import evaluation.scoring; import openai"],
+            cwd=repo,
+        )
+    elif bench == "lab":
         for binary in ("pandoc", "pdftoppm"):
             if not shutil.which(binary):
                 errors.append(f"{binary} missing; install pandoc and poppler-utils (README.md)")
