@@ -24,7 +24,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -34,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import config
+from .._compat import SIGKILL, kill_group
 from ..core import runmark as RM
 from ..core import tree as HT
 from ..core.spec import BenchPrompts, BenchSpec, resolve_channel_model
@@ -59,7 +59,7 @@ def run_detached(cmd: list[str], *, timeout: int, **kw) -> None:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            kill_group(proc, SIGKILL)
         except (ProcessLookupError, PermissionError):
             proc.kill()
         proc.wait()

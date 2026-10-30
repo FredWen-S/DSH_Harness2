@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .._compat import lock_exclusive, unlock
 from . import library as library_store
 from . import recursion, runmark, selection
 from . import tree as harness_tree
@@ -291,11 +292,9 @@ def _write_summary(summary_path: Path, res: TaskResult) -> None:
 
     Modes may be written by separate processes, so records accumulate per mode.
     """
-    import fcntl
-
     lock = summary_path.with_suffix(".lock")
     with open(lock, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        lock_exclusive(lf)
         try:
             merged = res.to_dict()
             if summary_path.is_file():
@@ -325,7 +324,7 @@ def _write_summary(summary_path: Path, res: TaskResult) -> None:
             tmp.write_text(json.dumps(merged, indent=2, default=str))
             os.replace(tmp, summary_path)
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            unlock(lf)
 
 
 def _resolve_libraries(

@@ -36,6 +36,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .. import config
+from .._compat import SIGKILL, kill_group
 from ..core import runmark as RM
 from ..core import tree as HT
 from ..core.selection import order_graded_first
@@ -457,9 +458,9 @@ def _log(msg: str) -> None:
 
 def _kill_group(proc: "subprocess.Popen", sig: int, *, grace: int) -> None:
     """Signal the whole process group, wait out `grace`, then SIGKILL what is left."""
-    for attempt in (sig, signal.SIGKILL):
+    for attempt in (sig, SIGKILL):
         try:
-            os.killpg(proc.pid, attempt)
+            kill_group(proc, attempt)
         except (ProcessLookupError, PermissionError):
             proc.kill()
         try:
