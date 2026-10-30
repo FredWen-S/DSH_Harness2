@@ -423,6 +423,23 @@ _NUDGE = (
 # DSH mounts PowerShell, not bash, as the shell tool on Windows hosts.
 DSH_SHELL_TOOL = "pwsh" if os.name == "nt" else "bash"
 
+# The OpenCode cell gates rollouts to LAB's native tools (bash, read, write, edit, glob, grep)
+# plus `skill` (run_opencode.py tool_map, tool mode "base"). These DSH tool rows have no
+# counterpart there -- web research, delegation (allow_subagents=False), workflows, todos,
+# goals, background jobs, plugin management -- so LAB rollouts run with them disabled.
+LAB_TOOL_GATE = (
+    "tool-web",
+    "tool-subagent",
+    "tool-subagent-fork",
+    "tool-subagent-control",
+    "tool-subagent-list-agents",
+    "tool-workflow",
+    "tool-plugin-manager",
+    "tool-todo",
+    "tool-goal",
+    "tool-jobs",
+)
+
 DSH_ENV_DELTA = """\
 You are running under DeepSeek Harness. Three details differ from the description
 above -- where they conflict, **these win**:
@@ -971,7 +988,10 @@ class LabAdapter:
             f"=== ASSIGNMENT ===\n{task['instructions']}"
         )
         stream = results_dir / DSH.STREAM_NAME
-        rc, wall, tail = DSH.run_headless(prompt, workspace, env, stream, timeout=req.timeout)
+        gate = DSH.disable_rows(LAB_TOOL_GATE)
+        rc, wall, tail = DSH.run_headless(
+            prompt, workspace, env, stream, timeout=req.timeout, overlay=gate
+        )
         # Same continuation policy as run_opencode.py: up to two nudges, skipped only when a
         # deliverable exists AND the last reply is exactly DONE, stopped by a short budget or
         # by a nudge that made no tool call.
@@ -991,7 +1011,13 @@ class LabAdapter:
             nudges += 1
             more = stream.with_name(f"dsh_session.nudge{nudges}.jsonl")
             rc, w, tail = DSH.run_headless(
-                _NUDGE, workspace, env, more, timeout=int(remaining), session_id=sid
+                _NUDGE,
+                workspace,
+                env,
+                more,
+                timeout=int(remaining),
+                session_id=sid,
+                overlay=gate,
             )
             wall += w
             with stream.open("ab") as fh:
@@ -1020,6 +1046,7 @@ class LabAdapter:
             "nudges": nudges,
             "workspace": str(workspace),
             "dsh_runtime": DSH.runtime_fingerprint(),
+            "tool_gate": list(LAB_TOOL_GATE),
         }
         (results_dir / "config.json").write_text(
             json.dumps(config_json, indent=2), encoding="utf-8"
