@@ -292,6 +292,106 @@ Then reply with ONE `<notes>` block and nothing else: for each change, the momen
 trajectory that motivated it. The notes are read by a person, not applied by a machine."""
 
 
+_SURFACE_DSH = """\
+# WHAT YOU CAN CHANGE
+
+The harness is a tree of components. Each has a different runtime cost and a different reach:
+
+| path | what it is | when it is in context |
+|---|---|---|
+| `systemprompt.md` | role and procedure | ALWAYS ON -- every token competes with the agent's own output budget |
+| `guardrails.md` | standing rules | ALWAYS ON -- same cost |
+| `LongTermMEMORY.md` | durable domain facts | ALWAYS ON -- same cost |
+| `tool_descriptions/tool_guidance.md` | how to use the tools | ALWAYS ON -- same cost |
+| `skills/<name>/SKILL.md` | a reusable workflow | name+description advertised; the BODY is loaded ON DEMAND via the `skill` tool |
+| `skills/<name>/scripts/*` | a helper carried with its skill | run via the shell |
+| `sub_agents/<name>/AGENT.md` | a delegated subagent role | runs in its OWN context via the `subagent` tool, returns text |
+| `scripts/<name>.py` | a deterministic helper | run on demand via the shell as `python scripts/<name>.py` |
+
+This runtime has NO tool-loop middleware a harness can ship: nothing you write acts inside the
+tool loop, so every rule you add is prose the agent may skip. Where a check must not be
+skipped, make it a script the always-on text requires before finishing.
+
+The two that are easy to get wrong:
+
+`skills/` -- frontmatter needs `name:` matching the directory and a `description:`, or it is
+dropped silently at load. Only the name and description are shown up front; the body is read
+when the agent calls the `skill` tool. Two further rules below decide whether it survives
+validation at all: it must be named in the always-on text, and its name must be kebab-case.
+
+`sub_agents/` -- frontmatter needs a `description:`. The agent passes the role file's text and
+the sub-task to the `subagent` tool; the child starts with an EMPTY conversation, sees only
+that prompt, and returns text. So it is worth it for exactly one shape of problem: a bounded
+sub-task whose INPUT is large and whose ANSWER is small. It is a bad trade when the output is
+as big as the input.
+
+Change only what a trajectory shows needs changing -- but WHERE you change something, the FORM
+matters as much as the content, and the cheap form is not the obvious one.
+
+ALWAYS-ON PROSE IS THE EXPENSIVE OPTION. Every word of it is in context on every run, competing
+with the agent's own output budget -- and the most costly failure on this work is a run that
+reasons until the budget is gone and produces nothing. Adding prose makes that MORE likely, not
+less. An on-demand component costs nothing until the moment it is invoked.
+
+So prefer, in this order:
+  - a SKILL for anything with a recognisable trigger -- a procedure for a document type, a
+    format, a recurring situation. This is the default form for new instruction.
+  - a SCRIPT for a deterministic operation the runs hand-rolled and got wrong, or did slowly --
+    including a check the agent must run on its output before it finishes.
+  - a SUBAGENT for a bounded investigation whose input is large and whose answer is small.
+  - ALWAYS-ON TEXT last, and only for a short rule that genuinely applies to every run. If you
+    add always-on text, cut something else to pay for it.
+
+THREE RULES THAT DISCARD THE WHOLE PROPOSAL. Validation runs before any rollout, and a harness
+that fails it is thrown away entire.
+
+1. EVERY SKILL NEEDS A TRIGGER LINE -- the most violated rule here by a wide margin. If you
+   create or keep `skills/<name>/SKILL.md`, its directory name must appear VERBATIM in
+   `systemprompt.md` or `guardrails.md`, in the SAME edit:
+
+       When <the situation this skill handles>, load the `<name>` skill.
+
+   An unnamed skill is never opened anyway: the line is what makes it exist.
+
+2. SKILL NAMES ARE KEBAB-CASE. The runtime loads a skill only if its name is lowercase words
+   joined by single hyphens (`contract-review`, not `contract_review` or `ContractReview`), and
+   drops any other name without telling the agent. The directory and its `name:` line must
+   both be that kebab-case name.
+
+3. EVERY SCRIPT YOU NAME MUST EXIST. A `scripts/<file>.py` invoked from a SKILL.md or from
+   always-on text must ship in the same proposal, a skill's own helper at
+   `skills/<skill-name>/scripts/<file>.py`; one dropped loose in the skill directory is OFF THE
+   EDITABLE SURFACE and silently discarded. The one exception is a script the RUNTIME already
+   provides in the workspace.
+
+THE DELIVERABLE'S SHAPE BELONGS TO THE REQUEST, NOT TO YOU. A harness changes HOW the agent
+works; it must never change WHAT SHAPE it delivers. Where the task names fields, columns, sheets,
+sections or an order, that shape is part of what was asked for. A component that tells the agent
+to add explanatory columns, restate a derivation inside the artifact, rename a header for
+clarity, or surface intermediate values so a reviewer can check them is CHANGING THE DELIVERABLE
+-- and a downstream reader or importer keys on exact names and positions. Guidance that makes the
+agent's reasoning visible belongs in the harness text or the trajectory, never in the artifact.
+A value the task asks for must be delivered AS A VALUE: a formula, a placeholder or a
+described-but-unperformed calculation leaves the reader to finish the work.
+
+# HOW TO MAKE A CHANGE
+
+The harness is in `context/harness/`, and it is YOURS TO EDIT. Open the files, change them in
+place with your normal tools, and create new ones where a new component is the right lever.
+Your edits on disk ARE the proposal -- there is no separate format to reproduce them in, and
+nothing you write in this reply changes the harness.
+
+- Files you do not touch are inherited unchanged. Do not rewrite a file to keep it the same.
+- Delete a file to remove that component.
+- Never create a file named `AGENTS.md`: the runtime composes it from the always-on files.
+- If the evidence does not argue for any change, leave everything as it is and say KEEP_BASE
+  in your notes. That is a real answer, not a failure: adaptation the evidence does not support
+  costs context and buys nothing.
+
+Then reply with ONE `<notes>` block and nothing else: for each change, the moment in a
+trajectory that motivated it. The notes are read by a person, not applied by a machine."""
+
+
 GENERALIZE = """\
 # GROUND IT IN THIS WORKSPACE, SHAPE IT FOR THE {DOMAIN_WORD_UPPER}
 
@@ -513,6 +613,50 @@ Hard rules, each one learned from a previous failure:
   surface."""
 
 
+_TTS_SURFACE_HEAD_DSH = """\
+# EDITABLE HARNESS SURFACE
+
+You may write ONLY these paths. Anything else is off the editable surface: it is dropped before
+your work is used, however good it is.
+
+| path | component | when it is in context |
+|---|---|---|
+| `systemprompt.md` | c1 persona/procedure | ALWAYS ON -- every token competes with the output budget |
+| `guardrails.md` | c6 always-on rules | ALWAYS ON -- same cost |
+| `LongTermMEMORY.md` | c3 durable domain facts | ALWAYS ON -- same cost |
+| `tool_descriptions/tool_guidance.md` | c4 tool prose | ALWAYS ON -- same cost |
+| `skills/<name>/SKILL.md` | c6 reusable workflow | loaded ON DEMAND via the `skill` tool |
+| `skills/<name>/scripts/*` | helper carried with its skill | run via the shell |
+| `sub_agents/<name>/AGENT.md` | c5 delegated subagent role | run ON DEMAND via the `subagent` tool, in its OWN context |
+| `scripts/<name>.py` | c7 deterministic helper | run ON DEMAND via the shell as `python scripts/<name>.py` |
+
+There is no c8: this runtime cannot load tool-loop middleware from a harness, so nothing here
+acts inside the tool loop. A check that must not be skipped is a script the always-on text
+requires before finishing.
+
+## The on-demand lever that is easy to get wrong
+
+`sub_agents/<name>/AGENT.md` -- frontmatter needs a `description:`. The main agent passes the
+role file's text and the sub-task to the `subagent` tool. The child starts with an EMPTY
+conversation: it sees only that prompt, not the main conversation, and it returns text. That
+makes it worth using for exactly one shape of problem -- a bounded sub-task whose inputs are
+large and whose ANSWER is small (read twelve PDFs, return one normalised table). It is a bad
+trade when the sub-task's output is as big as its input, because you pay a whole extra episode
+to move context around. Rare in the harnesses adopted so far: add one only where a trajectory
+shows the failure it would fix.
+
+Hard rules, each one learned from a previous failure:
+- The single most common failure of this harness family is producing NO deliverable because the
+  model exhausted its output budget on reasoning. Always-on prose makes that WORSE. Prefer an
+  on-demand skill over new always-on prose; if you add always-on text, cut something else.
+- Skills load via the `skill` tool, subagents via the `subagent` tool, scripts via the shell.
+  NEVER instruct the agent to go read `skills/.../SKILL.md` or `sub_agents/.../AGENT.md` off the
+  filesystem.
+- `scripts/*.py` filenames must be snake_case and must compile under py_compile.
+- Never write `AGENTS.md`: the runtime composes it from the always-on files, and it is not on
+  the editable surface."""
+
+
 _TTS_INV = """\
 # YOUR DIMENSION: INVARIANT -- how the agent works, independent of the subject
 
@@ -629,6 +773,13 @@ def _build_surface_texts() -> dict[str, _SurfaceText]:
             _surface_part(_SURFACE_CODEX, "# HOW TO MAKE A CHANGE"),
         ]
     )
+    dsh_tts = "\n\n".join(
+        [
+            _TTS_SURFACE_HEAD_DSH,
+            _surface_part(_SURFACE_DSH, "THREE RULES THAT DISCARD", "THE DELIVERABLE'S SHAPE"),
+            _surface_part(_SURFACE_DSH, "# HOW TO MAKE A CHANGE"),
+        ]
+    )
     return {
         "opencode": _SurfaceText(
             surface_md=_SURFACE_OPENCODE,
@@ -657,6 +808,21 @@ def _build_surface_texts() -> dict[str, _SurfaceText]:
                 "that trigger line in the same edit.",
             ),
             tts_surface=cx_tts,
+        ),
+        "dsh": _SurfaceText(
+            surface_md=_SURFACE_DSH,
+            inv=_INV_TEMPLATE.replace(
+                "__LOOP_LEVER__",
+                "`scripts/<name>.py` check that the always-on text requires before finishing "
+                "-- for example, confirming a {deliverable} exists and opens (this runtime has "
+                "no tool-loop hook)",
+            ),
+            dom=_DOM_TEMPLATE.replace(
+                "__TRIGGER_SENTENCE__",
+                "A skill exists only once its name appears in the always-on text: write that "
+                "trigger line in the same edit, and give it a kebab-case name.",
+            ),
+            tts_surface=dsh_tts,
         ),
     }
 

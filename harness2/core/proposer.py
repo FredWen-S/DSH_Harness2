@@ -159,9 +159,10 @@ class Proposer:
                 if context_dir and Path(context_dir).is_dir():
                     shutil.copytree(context_dir, tmp / "context", dirs_exist_ok=True)
                 with _SEM if _SEM is not None else contextlib.nullcontext():
-                    text, cost, err = (
-                        self._claude_cli if self.spec.kind == "claude_cli" else self._opencode
-                    )(tmp, mission, system, wall)
+                    session = {"claude_cli": self._claude_cli, "dsh": self._dsh}.get(
+                        self.spec.kind, self._opencode
+                    )
+                    text, cost, err = session(tmp, mission, system, wall)
                 spent_usd += cost
                 if not text.strip():
                     last = err or "empty reply"
@@ -309,6 +310,37 @@ class Proposer:
             return text, cost, ""
         tail = _strip_oc_banner(p.stderr or "").strip()[-300:]
         return "", cost, f"rc={p.returncode}: {err or tail or 'empty reply'}"
+
+    def _dsh(self, cwd: Path, mission: str, system: str, wall: int) -> tuple[str, float, str]:
+        """One DSH headless turn in `cwd`, which is also the sandbox's writable root.
+
+        The agents home is an empty directory and no skill root is mounted, so the session
+        carries none of the harness it is editing. DSH reports tokens, not prices: cost is 0.
+        """
+        from ..substrate import dsh as DSH
+
+        (cwd / "MISSION.md").write_text(
+            (f"{system}\n\n---\n\n" if system else "") + mission, encoding="utf-8"
+        )
+        out = cwd / "output"
+        out.mkdir(exist_ok=True)
+        home = cwd / ".h2" / "agents-home"
+        home.mkdir(parents=True)
+        prompt = (
+            "Read MISSION.md first. Do what it asks. Reply with the requested output as "
+            "your final message AND save it verbatim to output/answer.md."
+        )
+        env = DSH.dsh_env(self.env(), agents_home=home, skills_dir=None, model=self.spec.model)
+        stream = cwd / ".h2" / DSH.STREAM_NAME
+        rc, _, tail = DSH.run_headless(prompt, cwd, env, stream, timeout=wall)
+        ans = out / "answer.md"
+        if ans.is_file() and ans.read_text(errors="replace").strip():
+            return ans.read_text(errors="replace"), 0.0, ""
+        text = DSH.final_text(stream)
+        if text.strip():
+            return text, 0.0, ""
+        why = "timeout" if rc == -1 else f"rc={rc}"
+        return "", 0.0, f"{why}: {tail or 'empty reply'}"
 
     def _harvest(self, tmp: Path, sub: str, label: str, cache_key: str = "") -> Path | None:
         """Copy `tmp/<sub>` somewhere durable before the session directory is removed."""
