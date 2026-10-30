@@ -227,7 +227,50 @@ class DshChannelTests(unittest.TestCase):
             rc, _, _ = DSH.run_headless("go on", tmp, {}, stream, timeout=60, session_id="s-1")
         self.assertEqual(rc, 0)
         argv = json.loads(stream.read_text(encoding="utf-8"))["argv"]
-        self.assertEqual(argv, ["--profile", DSH.PROFILE, "--json", "--session-id", "s-1", "-"])
+        self.assertEqual(
+            argv,
+            [
+                "--profile",
+                DSH.PROFILE,
+                "--patch",
+                str(DSH.overlay_path()),
+                "--json",
+                "--session-id",
+                "s-1",
+                "-",
+            ],
+        )
+
+
+class DshIsolationTests(unittest.TestCase):
+    def test_enabled_mcp_clients_are_reported(self):
+        cfg = (
+            "- id: llm\n  name: x\n"
+            "- id: mcp-reason-network\n  name: '@deepseek-ai/dsh-mcp-client'\n  config: {}\n"
+            "- id: mcp-other\n  name: '@deepseek-ai/dsh-mcp-client'\n  disabled: true\n"
+        )
+        self.assertEqual(
+            DSH.isolation_problems(cfg),
+            ["MCP client 'mcp-reason-network' is enabled in the effective DSH config"],
+        )
+
+    def test_forbidden_paths_are_found_in_calls_and_results(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        events = [
+            {
+                "type": "tool_call",
+                "tool": "read",
+                "input": {"file_path": "C:\\b\\tasks\\x\\task.json"},
+            },
+            {"type": "tool_result", "status": "completed", "result": "nothing here"},
+            {"type": "text", "text": "task.json is mentioned only in prose"},
+        ]
+        stream = write_stream(tmp / "s.jsonl", events)
+        self.assertEqual(DSH.forbidden_touches(stream, ["task.json"]), ["read: task.json"])
+        self.assertEqual(DSH.forbidden_touches(stream, ["C:\\b\\tasks"]), ["read: c:/b/tasks"])
+        self.assertEqual(DSH.forbidden_touches(stream, ["scores.json"]), [])
+        self.assertEqual(DSH.tool_call_count(stream), 1)
 
 
 class DshCredentialTests(unittest.TestCase):

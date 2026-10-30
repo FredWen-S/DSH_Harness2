@@ -20,6 +20,7 @@ Upstream tools run in subprocesses under `config.LAB_PYTHON`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -460,6 +461,13 @@ def _pandoc_dir() -> str:
     return ""
 
 
+def judge_id(judge_model: str) -> str:
+    """The id the LAB judge records in scores.json: provider prefixes are stripped."""
+    if judge_model.startswith(("compat/", "vertex/")):
+        return judge_model.split("/", 1)[1]
+    return judge_model
+
+
 def _judge_env(judge_model: str) -> dict[str, str]:
     """The judge's environment. A `compat/<model>` judge reads its endpoint from
     HARNESS2_JUDGE_BASE_URL (default: OpenCode Go) and its key from HARNESS2_JUDGE_API_KEY,
@@ -490,9 +498,49 @@ def _dsh_lab_env() -> dict[str, str]:
     """A rollout's environment: `python` is the LAB interpreter (its document parsers and
     the skill helpers' dependencies), documents parse on the host, output is UTF-8."""
     env = _lab_env()
+    # The skill helpers need only the venv's packages; no import path into the checkout.
+    env.pop("PYTHONPATH", None)
     env["LAB_DOC_PARSER"] = "host"
-    env["LAB_BENCH_ROOT"] = str(config.lab_repo())
+    env["LAB_BENCH_ROOT"] = str(_parser_root())
     return env
+
+
+def _dsh_work_root() -> Path:
+    root = Path(os.environ.get("HARNESS2_DSH_WORKROOT") or Path(tempfile.gettempdir()) / "h2ws")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _parser_root() -> Path:
+    """A copy of the checkout's document parsers alone, so `read_doc.py` resolves them
+    without pointing a rollout at the directory that holds every task's criteria."""
+    root = _dsh_work_root() / "_lab_runtime"
+    src = config.lab_repo() / "sandbox" / "parsers"
+    dest = root / "sandbox" / "parsers"
+    if not (dest / "parse_doc.py").is_file():
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+    return root
+
+
+def _forbidden_needles() -> list[str]:
+    """Paths whose appearance in a DSH tool call means ground truth or judge output."""
+    tasks = config.lab_repo() / "tasks"
+    return DSH.forbidden_needles(
+        (str(tasks), tasks.as_posix(), "task.json", "scores.json", "judge.log", "scores_")
+    )
+
+
+def _force_rmtree(d: Path) -> None:
+    """Remove a tree that holds read-only files (the copied documents), then verify."""
+
+    def _writable(func, path, _exc):
+        os.chmod(path, 0o666)
+        func(path)
+
+    if d.exists():
+        shutil.rmtree(d, onexc=_writable)
+    if d.exists():
+        raise RuntimeError(f"could not remove {d}")
 
 
 def _json_or_none(p: Path) -> dict | None:
@@ -636,6 +684,9 @@ class LabAdapter:
             self.substrate = DshSubstrate(launcher=self._launch_dsh)
             self.model = model or DSH.SOLVER_MODEL
             self._results_root = config.RUNS / "lab" / "results" / "dsh"
+            # Improver, selector and reflector sessions run in this process's DSH channel and
+            # read the forbidden-path list from the environment.
+            os.environ[DSH.FORBIDDEN_ENV] = os.pathsep.join(_forbidden_needles())
         else:
             self.substrate = CodexSubstrate(launcher=self._launch_cx)
             self.model = model or config.SOLVER_MODEL_CX
@@ -871,7 +922,13 @@ class LabAdapter:
     def _run_dsh(
         self, req: RunRequest, task: dict, run_id: str, results_dir: Path, staged: Install
     ) -> None:
-        workspace = results_dir / "workspace"
+        # The workspace lives outside the repository (and so away from the benchmark
+        # checkout and every results directory); DSH cannot confine reads on Windows.
+        workspace = (
+            _dsh_work_root()
+            / hashlib.sha1(str(results_dir.resolve()).encode("utf-8")).hexdigest()[:16]
+        )
+        _force_rmtree(workspace)
         output_dir = workspace / "output"
         docs = workspace / "documents"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -911,12 +968,22 @@ class LabAdapter:
         )
         stream = results_dir / DSH.STREAM_NAME
         rc, wall, tail = DSH.run_headless(prompt, workspace, env, stream, timeout=req.timeout)
+        # Same continuation policy as run_opencode.py: up to two nudges, skipped only when a
+        # deliverable exists AND the last reply is exactly DONE, stopped by a short budget or
+        # by a nudge that made no tool call.
         nudges = 0
-        while nudges < 2 and rc == 0 and not any(p.is_file() for p in output_dir.rglob("*")):
-            sid = DSH.session_id(stream)
+        last = stream
+        sid = DSH.session_id(stream)
+        for _ in range(2):
             remaining = req.timeout - wall
-            if not sid or remaining < 60:
+            if remaining < 60 or not sid:
                 break
+            if (
+                any(p.is_file() for p in output_dir.rglob("*"))
+                and DSH.final_text(last).strip() == "DONE"
+            ):
+                break
+            before = DSH.tool_call_count(stream)
             nudges += 1
             more = stream.with_name(f"dsh_session.nudge{nudges}.jsonl")
             rc, w, tail = DSH.run_headless(
@@ -925,7 +992,12 @@ class LabAdapter:
             wall += w
             with stream.open("ab") as fh:
                 fh.write(more.read_bytes())
-            more.unlink()
+            last = stream.with_name("dsh_session.last.jsonl")
+            more.replace(last)
+            if DSH.tool_call_count(stream) == before:
+                break
+        if last != stream:
+            last.unlink(missing_ok=True)
         graded = results_dir / "output"
         graded.mkdir(parents=True, exist_ok=True)
         for src in output_dir.rglob("*"):
@@ -942,6 +1014,8 @@ class LabAdapter:
             "profile": DSH.PROFILE,
             "harness": staged.extras.get("harness", "staged"),
             "nudges": nudges,
+            "workspace": str(workspace),
+            "dsh_runtime": DSH.runtime_fingerprint(),
         }
         (results_dir / "config.json").write_text(
             json.dumps(config_json, indent=2), encoding="utf-8"
@@ -964,10 +1038,17 @@ class LabAdapter:
             "wall_clock_seconds": wall,
             "cost_usd": 0.0,
             "finished_cleanly": rc == 0 and DSH.completed(stream),
+            "forbidden_access": DSH.forbidden_touches(stream, _forbidden_needles()),
             "exit_code": rc,
             "tool_calls": sum(1 for e in DSH.iter_events(stream) if e.get("type") == "tool_call"),
         }
         (results_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        if metrics["forbidden_access"]:
+            print(
+                f"  [lab-dsh] {run_id} touched ground-truth paths: {metrics['forbidden_access']}",
+                flush=True,
+            )
+        _force_rmtree(workspace)
 
     def _safe_rmtree(self, d: Path) -> None:
         """rm -rf restricted to this cell's results root — a guard, not a convenience."""
@@ -975,7 +1056,7 @@ class LabAdapter:
         root = self._results_root.resolve()
         if root != d and root not in d.parents:
             raise RuntimeError(f"refusing to remove {d}: outside the LAB results root {root}")
-        shutil.rmtree(d, ignore_errors=True)
+        _force_rmtree(d)
 
     def _output_fingerprint(self, run_dir: Path) -> str | None:
         return RM.fingerprint(Path(run_dir) / "output") if self.delivered(run_dir) else None
@@ -1243,6 +1324,10 @@ class LabAdapter:
         nothing is cached. The ABSOLUTE run dir is passed: run_eval joins its own
         RESULTS_DIR with it, and an absolute right-hand side wins that join."""
         p = Path(run_dir) / "scores.json"
+        cached = _json_or_none(p) if p.is_file() else None
+        if cached is not None and cached.get("judge_model") != judge_id(self.judge_model):
+            # A cached verdict from another judge is not this measurement: set it aside.
+            p.replace(p.with_name(f"scores.{cached.get('judge_model') or 'unknown'}.json"))
         if not p.is_file():
             cmd = [
                 str(config.LAB_PYTHON),

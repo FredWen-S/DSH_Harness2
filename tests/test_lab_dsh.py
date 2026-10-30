@@ -52,6 +52,27 @@ class LabDshTests(unittest.TestCase):
         self.assertIn("python scripts/read_doc.py", text)
 
 
+class LabHelpersTests(unittest.TestCase):
+    def test_judge_id_strips_provider_prefixes(self):
+        self.assertEqual(lab.judge_id("compat/gpt-6-luna"), "gpt-6-luna")
+        self.assertEqual(lab.judge_id("vertex/claude-opus-4-8"), "claude-opus-4-8")
+        self.assertEqual(lab.judge_id("gpt-5.5"), "gpt-5.5")
+
+    def test_force_rmtree_removes_read_only_files(self):
+        import os
+        import stat
+        import tempfile
+        from pathlib import Path
+
+        d = Path(tempfile.mkdtemp()) / "ws"
+        (d / "documents").mkdir(parents=True)
+        f = d / "documents" / "a.docx"
+        f.write_text("x", encoding="utf-8")
+        os.chmod(f, stat.S_IREAD)
+        lab._force_rmtree(d)
+        self.assertFalse(d.exists())
+
+
 class CompatJudgeEnvTests(unittest.TestCase):
     def test_compat_judge_gets_endpoint_key_and_session_header(self):
         with (

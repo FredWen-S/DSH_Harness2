@@ -31,6 +31,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from . import config
+from .core import runmark as RM
 from .core import tree
 from .core.spec import BenchPrompts, BenchSpec, ChannelSpec
 from .substrate import dsh as DSH
@@ -97,6 +98,9 @@ BASE_SYSTEM = (
     "tools available and save the requested output where the task says.\n"
 )
 
+# The module holding the expected totals and the reports derived from them.
+_FORBIDDEN = ("dsh_demo.py", "dsh_demo.json", "dsh_demo.md", "scores.json")
+
 _TOTAL = re.compile(r"Total:\s*(-?[0-9]+\.[0-9]{2})\s*$")
 
 
@@ -126,6 +130,7 @@ class DshDemoAdapter:
             domain_word="bookkeeping area",
         )
         self.execution_count = 0
+        os.environ[DSH.FORBIDDEN_ENV] = os.pathsep.join(DSH.forbidden_needles(_FORBIDDEN))
         base = {name: "" for name in self.substrate.surface().always_on}
         base["systemprompt.md"] = BASE_SYSTEM
         tree.write_tree(self.substrate.surface(), base, self.base_harness(), stubs=False)
@@ -164,7 +169,8 @@ class DshDemoAdapter:
     ) -> Path:
         run_dir = self.root / "executions" / run_id
         stream = run_dir / DSH.STREAM_NAME
-        if DSH.completed(stream) and self.delivered(run_dir):
+        # Reuse only a finished run of this exact harness (the marker fingerprints its tree).
+        if RM.is_complete(run_dir, harness_dir=harness_dir) and self.delivered(run_dir):
             return run_dir
         shutil.rmtree(run_dir, ignore_errors=True)
         workspace = run_dir / "workspace"
@@ -182,15 +188,24 @@ class DshDemoAdapter:
                 stream,
                 timeout=int(timeout or self.timeout),
             )
+            touched = DSH.forbidden_touches(stream, DSH.forbidden_needles(_FORBIDDEN))
             (run_dir / "run.json").write_text(
                 json.dumps(
-                    {"rc": rc, "wall_s": wall, "stderr_tail": tail, **DSH.token_usage(stream)},
+                    {
+                        "rc": rc,
+                        "wall_s": wall,
+                        "stderr_tail": tail,
+                        "forbidden_access": touched,
+                        **DSH.token_usage(stream),
+                    },
                     indent=1,
                 ),
                 encoding="utf-8",
             )
         finally:
             shutil.rmtree(install.staging_dir, ignore_errors=True)
+        if DSH.completed(stream):
+            RM.mark_complete(run_dir, run_id=run_id, harness_dir=harness_dir)
         return run_dir
 
     def _answer(self, run_dir: Path) -> Path:

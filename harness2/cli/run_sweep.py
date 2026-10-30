@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -224,6 +225,13 @@ def _check_identity(adapter, args, namespace_dir: Path) -> None:
         "domains": sorted(_csv(args.only_domains)),
         "seed": args.seed,
     }
+    if args.substrate == "dsh":
+        from ..substrate import dsh as DSH
+
+        # What a DSH run boots (composed profile + permission mode) and where its judge
+        # lives are part of the measurement, so a resume under changed ones must not mix.
+        identity["dsh_runtime"] = DSH.runtime_fingerprint()
+        identity["judge_endpoint"] = os.environ.get("HARNESS2_JUDGE_BASE_URL", "default")
     namespace_dir.mkdir(parents=True, exist_ok=True)
     path = namespace_dir / "config.json"
     if path.is_file():

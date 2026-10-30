@@ -333,9 +333,19 @@ class Proposer:
         env = DSH.dsh_env(self.env(), agents_home=home, skills_dir=None, model=self.spec.model)
         stream = cwd / ".h2" / DSH.STREAM_NAME
         rc, _, tail = DSH.run_headless(prompt, cwd, env, stream, timeout=wall)
+        if self.audit_dir and stream.is_file():
+            # The session directory is removed after the call; keep its event stream.
+            keep = Path(self.audit_dir) / "dsh-streams" / f"{cwd.name}.jsonl"
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(stream, keep)
+        touched = DSH.forbidden_touches(stream, DSH.forbidden_needles())
+        if touched:
+            # Reads are unconfined on DSH's Windows sandbox; a session that reached ground
+            # truth or judge output is discarded rather than allowed to steer the harness.
+            return "", 0.0, f"ground-truth access: {'; '.join(touched)[:300]}"
         ans = out / "answer.md"
-        if ans.is_file() and ans.read_text(errors="replace").strip():
-            return ans.read_text(errors="replace"), 0.0, ""
+        if ans.is_file() and ans.read_text(encoding="utf-8", errors="replace").strip():
+            return ans.read_text(encoding="utf-8", errors="replace"), 0.0, ""
         text = DSH.final_text(stream)
         if text.strip():
             return text, 0.0, ""

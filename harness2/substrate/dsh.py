@@ -34,6 +34,7 @@ the task on stdin and the rollout workspace as cwd; the sandbox's workspace root
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -99,6 +100,19 @@ STREAM_NAME = "dsh_session.jsonl"
 PROFILE = os.environ.get("HARNESS2_DSH_PROFILE", "h2")
 SOLVER_MODEL = os.environ.get("HARNESS2_DSH_SOLVER_MODEL", "opencode-go/deepseek-v4-pro")
 
+# Applied with `--patch` on every run, i.e. after the profile AND the user-global layer
+# (~/.dsh/cordis.patch.yml), which a profile layer cannot override. It disables the MCP
+# client that layer inserts; preflight then rejects any MCP client still enabled, so host
+# configuration cannot hand experiment sessions extra tools.
+ISOLATION_OVERLAY = """- id: mcp-reason-network
+  name: "@deepseek-ai/dsh-mcp-client"
+  disabled: true
+"""
+
+# Substrings of tool inputs/outputs that mean a session touched ground truth or judge output.
+# Adapters extend this through HARNESS2_DSH_FORBIDDEN (os.pathsep-separated).
+FORBIDDEN_ENV = "HARNESS2_DSH_FORBIDDEN"
+
 # DSH's skill-filesystem drops a skill whose frontmatter name is not kebab-case, with no
 # diagnostic the model can see; the shared tree grammar also admits `_`.
 _KEBAB = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -132,12 +146,14 @@ def compose_agents_md(staged: Path) -> str:
     parts = [
         t
         for f in DSH_SURFACE.always_on
-        if (staged / f).is_file() and (t := (staged / f).read_text(errors="replace").strip())
+        if (staged / f).is_file()
+        and (t := (staged / f).read_text(encoding="utf-8", errors="replace").strip())
     ]
     agents = sorted(staged.glob("sub_agents/*/AGENT.md"), key=lambda p: p.parent.name)
     if agents:
         lines = "\n".join(
-            f"- `{p.parent.name}` ({_frontmatter_desc(p.read_text(errors='replace'))}): "
+            f"- `{p.parent.name}` "
+            f"({_frontmatter_desc(p.read_text(encoding='utf-8', errors='replace'))}): "
             f"role file `{p.as_posix()}`"
             for p in agents
         )
@@ -164,6 +180,75 @@ def install_scripts(install: Install, workspace: Path) -> list[str]:
         shutil.copy2(p, dest)
         names.append(p.name)
     return names
+
+
+def overlay_path() -> Path:
+    """The isolation overlay as a file DSH can load; rewritten when its text changes."""
+    p = Path(tempfile.gettempdir()) / "harness2-dsh" / "isolation.patch.yml"
+    if not p.is_file() or p.read_text(encoding="utf-8") != ISOLATION_OVERLAY:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ISOLATION_OVERLAY, encoding="utf-8")
+    return p
+
+
+def effective_config(profile: str = PROFILE) -> str:
+    """The composed configuration a run boots with (`--dump-config` under the overlay)."""
+    r = subprocess.run(
+        dsh_command() + ["--profile", profile, "--patch", str(overlay_path()), "--dump-config"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env={**os.environ, "HOME": os.environ.get("HOME", str(Path.home()))},
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"dsh --dump-config failed: {r.stderr.strip()[-400:]}")
+    return r.stdout
+
+
+def isolation_problems(config_text: str) -> list[str]:
+    """Enabled rows in the effective config that give a session tools from the host."""
+    problems = []
+    for block in ("\n" + config_text).split("\n- id: ")[1:]:
+        row_id = block.split("\n", 1)[0].strip()
+        if "dsh-mcp-client" in block and "\n  disabled: true" not in block:
+            problems.append(f"MCP client {row_id!r} is enabled in the effective DSH config")
+    return problems
+
+
+def runtime_fingerprint(profile: str = PROFILE) -> str:
+    """Digest of what a run boots: the effective config and the permission mode."""
+    text = effective_config(profile) + os.environ.get("DSH_PERMISSION_MODE", "workspace-write")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def forbidden_needles(extra: tuple[str, ...] = ()) -> list[str]:
+    raw = os.environ.get(FORBIDDEN_ENV, "")
+    return [n for n in (*raw.split(os.pathsep), *extra) if n.strip()]
+
+
+def forbidden_touches(path: Path, needles: list[str]) -> list[str]:
+    """Tool calls or results in a stream that mention a forbidden path (case-insensitive).
+
+    DSH's Windows sandbox leaves reads unconfined, so ground truth on the host is reachable;
+    this is the detection that stands in for a read boundary.
+    """
+    lowered = [n.lower().replace("\\", "/") for n in needles]
+    hits = []
+    for ev in iter_events(path):
+        if ev.get("type") not in ("tool_call", "tool_result"):
+            continue
+        body = json.dumps(ev.get("input") if ev["type"] == "tool_call" else ev.get("result"))
+        flat = body.lower().replace("\\\\", "/").replace("\\", "/")
+        for n in lowered:
+            if n and n in flat:
+                hits.append(f"{ev.get('tool') or ev['type']}: {n}")
+    return sorted(set(hits))
+
+
+def tool_call_count(path: Path) -> int:
+    return sum(1 for ev in iter_events(path) if ev.get("type") == "tool_call")
 
 
 def dsh_command() -> list[str]:
@@ -241,7 +326,7 @@ def run_headless(
     """
     stream_path.parent.mkdir(parents=True, exist_ok=True)
     err_path = stream_path.with_suffix(".stderr.log")
-    cmd = dsh_command() + ["--profile", profile, "--json"]
+    cmd = dsh_command() + ["--profile", profile, "--patch", str(overlay_path()), "--json"]
     if session_id:
         cmd += ["--session-id", session_id]
     cmd.append("-")
@@ -353,6 +438,12 @@ class DshSubstrate:
                     f"DSH profile {PROFILE!r} does not read {var}; copy docs/dsh-h2.patch.yml "
                     f"over {prof}"
                 )
+        problems = isolation_problems(effective_config())
+        if problems:
+            raise RuntimeError(
+                "; ".join(problems) + " -- disable it for this profile (add its id to "
+                "ISOLATION_OVERLAY in harness2/substrate/dsh.py)"
+            )
 
 
 _TRUNC_FMT = "…(+{n} chars — render truncation)"

@@ -64,9 +64,11 @@ after selection.
 The DSH cell mirrors the OpenCode cell: the same base prompt body, the same
 `results/<run_id>/{output,metrics.json,config.json}` layout `run_eval` scores, the base skill
 manuals (`docx`, `xlsx`, `pptx`) as runtime skills, `scripts/read_doc.py` with host parsing,
-and up to two continuation nudges when no deliverable was written. A DSH environment delta
-(absolute paths, explicit `output/`, `read_doc.py`) is appended to `AGENTS.md` at launch, as
-`ENV_DELTA` is for OpenCode; it is runtime, not harness.
+and `run_opencode.py`'s continuation policy (up to two nudges, skipped only when a deliverable
+exists and the last reply is exactly `DONE`, stopped by a short budget or a nudge that made no
+tool call). A DSH environment delta (absolute paths, explicit `output/`, `read_doc.py`, the
+platform's shell tool) is appended to `AGENTS.md` at launch, as `ENV_DELTA` is for OpenCode;
+it is runtime, not harness.
 
 ```bash
 harness2-setup lab               # or: clone + patches + overlays + uv sync, see below
@@ -85,6 +87,27 @@ measurement: these numbers are not comparable with the paper's Vertex-judged tab
 On Windows: enable `core.longpaths` in the harvey-labs checkout (some task paths exceed 260
 characters), and if pandoc is not installed, `uv pip install pypandoc_binary` into the LAB
 venv; the adapter puts its bundled binary on the rollout's PATH.
+
+## Isolation
+
+What a run boots is checked, not assumed:
+
+- Every DSH process gets `--patch` with `ISOLATION_OVERLAY` (`harness2/substrate/dsh.py`),
+  which applies after the profile **and** the user-global `~/.dsh/cordis.patch.yml`. It
+  disables the reason-network MCP client that layer inserts; preflight dumps the effective
+  config and refuses to start while any MCP client is still enabled.
+- The digest of that effective config and the permission mode (`runtime_fingerprint`) is part
+  of the sweep identity, so a resume under a changed DSH setup fails instead of mixing.
+- **Reads are not confined.** DSH's Windows sandbox enforces writes only (`partial`), so a
+  rollout or improver session could read the benchmark checkout. Mitigations: LAB rollout
+  workspaces live outside the repository (`HARNESS2_DSH_WORKROOT`, default `%TEMP%/h2ws`),
+  rollouts get no `PYTHONPATH` and a parser-only `LAB_BENCH_ROOT`, and every DSH stream is
+  scanned for tool calls or results that mention ground-truth or judge paths
+  (`HARNESS2_DSH_FORBIDDEN`). An improver session that touches one is discarded; a rollout
+  that does is recorded in `metrics.json` `forbidden_access` and reported by
+  `scripts/score_base_vs_final.py`. This is detection, not a boundary.
+- Judge verdicts are keyed by judge: a cached `scores.json` from another judge is set aside
+  and re-scored, and the comparison script refuses to mix judges.
 
 ## Differences from the released substrates
 
