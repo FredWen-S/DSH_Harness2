@@ -102,8 +102,11 @@ What a run boots is checked, not assumed:
   rollout or improver session could read the benchmark checkout. Mitigations: LAB rollout
   workspaces live outside the repository (`HARNESS2_DSH_WORKROOT`, default `%TEMP%/h2ws`),
   rollouts get no `PYTHONPATH` and a parser-only `LAB_BENCH_ROOT`, and every DSH stream is
-  scanned for tool calls or results that mention ground-truth or judge paths
-  (`HARNESS2_DSH_FORBIDDEN`). An improver session that touches one is discarded; a rollout
+  scanned for tool calls or results that mention ground-truth or judge paths: the
+  checkout's `tasks/` and the runs root, plus `HARNESS2_DSH_FORBIDDEN`. Not the whole
+  checkout, whose `.venv` holds the LAB interpreter and pandoc that rollouts legitimately
+  print. `HARNESS2_*` variables are stripped from every DSH child's environment, so the
+  list itself is not visible to the agent. An improver session that touches one is discarded; a rollout
   that does is recorded in `metrics.json` `forbidden_access` and reported by
   `scripts/score_base_vs_final.py`. This is detection, not a boundary.
 - Judge verdicts are keyed by judge: a cached `scores.json` from another judge is set aside

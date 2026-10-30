@@ -182,13 +182,22 @@ def install_scripts(install: Install, workspace: Path) -> list[str]:
     return names
 
 
-def overlay_path() -> Path:
-    """The isolation overlay as a file DSH can load; rewritten when its text changes."""
-    p = Path(tempfile.gettempdir()) / "harness2-dsh" / "isolation.patch.yml"
-    if not p.is_file() or p.read_text(encoding="utf-8") != ISOLATION_OVERLAY:
+def overlay_path(text: str = ISOLATION_OVERLAY) -> Path:
+    """A patch-list overlay as a file DSH can load, named by its content digest."""
+    if text == ISOLATION_OVERLAY:
+        name = "isolation.patch.yml"
+    else:
+        name = f"overlay-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}.patch.yml"
+    p = Path(tempfile.gettempdir()) / "harness2-dsh" / name
+    if not p.is_file() or p.read_text(encoding="utf-8") != text:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(ISOLATION_OVERLAY, encoding="utf-8")
+        p.write_text(text, encoding="utf-8")
     return p
+
+
+def disable_rows(row_ids: tuple[str, ...]) -> str:
+    """An overlay disabling these effective-config rows (e.g. tools a benchmark gates off)."""
+    return "".join(f"- id: {r}\n  disabled: true\n" for r in row_ids)
 
 
 def effective_config(profile: str = PROFILE) -> str:
@@ -284,9 +293,12 @@ def dsh_env(
     `effort` is the reasoning effort DSH validates against the model (DeepSeek V4 Pro on
     OpenCode Go accepts `high`). DSH has no per-run step cap, so `ChannelSpec.steps` has no
     counterpart here.
+
+    `HARNESS2_*` variables stay with the harness: the forbidden-path list names where ground
+    truth lives, and an agent that lists its environment would read it.
     """
     provider, name = split_model(model)
-    env = dict(base_env)
+    env = {k: v for k, v in base_env.items() if not k.upper().startswith("HARNESS2_")}
     env["DSH_AGENTS_HOME"] = str(agents_home)
     if skills_dir is not None:
         env["H2_SKILLS_DIR"] = str(skills_dir)
@@ -330,6 +342,7 @@ def run_headless(
     timeout: int,
     profile: str = PROFILE,
     session_id: str | None = None,
+    overlay: str = "",
 ) -> tuple[int, float, str]:
     """One headless DSH turn: events to `stream_path`; returns (rc, wall seconds, stderr tail).
 
@@ -339,7 +352,11 @@ def run_headless(
     """
     stream_path.parent.mkdir(parents=True, exist_ok=True)
     err_path = stream_path.with_suffix(".stderr.log")
-    cmd = dsh_command() + ["--profile", profile, "--patch", str(overlay_path()), "--json"]
+    cmd = dsh_command() + ["--profile", profile, "--patch", str(overlay_path())]
+    if overlay:
+        # Applied after the isolation overlay: a benchmark's tool gate, for instance.
+        cmd += ["--patch", str(overlay_path(overlay))]
+    cmd.append("--json")
     if session_id:
         cmd += ["--session-id", session_id]
     cmd.append("-")

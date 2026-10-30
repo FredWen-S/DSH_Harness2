@@ -15,7 +15,10 @@
 """The LAB cell on DSH: its spec, runtime-owned names, and the compat judge environment."""
 
 import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from harness2 import config
@@ -53,6 +56,31 @@ class LabDshTests(unittest.TestCase):
 
 
 class LabHelpersTests(unittest.TestCase):
+    def test_forbidden_paths_cover_criteria_not_the_lab_interpreter(self):
+        needles = lab._forbidden_needles()
+        tasks = str((config.lab_repo() / "tasks").resolve())
+        self.assertIn(tasks, needles)
+        self.assertNotIn(str(config.lab_repo().resolve()), needles)
+        venv_python = str(config.lab_repo().resolve() / ".venv" / "Scripts" / "python.exe")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        stream = tmp / "s.jsonl"
+        stream.write_text(
+            "\n".join(
+                json.dumps(ev)
+                for ev in (
+                    {"type": "tool_call", "tool": "pwsh", "input": {"command": "python -V"}},
+                    {"type": "tool_result", "tool": "pwsh", "result": venv_python},
+                    {"type": "tool_call", "tool": "read", "input": {"file_path": tasks}},
+                )
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            DSH.forbidden_touches(stream, needles),
+            [f"read: {tasks.lower().replace(chr(92), '/')}"],
+        )
+
     def test_judge_id_strips_provider_prefixes(self):
         self.assertEqual(lab.judge_id("compat/gpt-6-luna"), "gpt-6-luna")
         self.assertEqual(lab.judge_id("vertex/claude-opus-4-8"), "claude-opus-4-8")
