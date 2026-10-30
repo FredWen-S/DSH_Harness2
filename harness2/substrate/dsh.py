@@ -28,7 +28,7 @@ in the staged copy.
 DSH has no tool-loop middleware a harness can ship (its plugins are host packages, not
 per-run files), so c8 is absent from this surface rather than read as prose.
 
-The runner boots the `h2` profile (see docs/DSH.md) with `dsh --profile h2 headless --json -`,
+The runner boots the `h2` profile (see docs/DSH.md) with `dsh --profile h2 --json -`,
 the task on stdin and the rollout workspace as cwd; the sandbox's workspace root is that cwd.
 """
 
@@ -218,7 +218,7 @@ def run_headless(
     """
     stream_path.parent.mkdir(parents=True, exist_ok=True)
     err_path = stream_path.with_suffix(".stderr.log")
-    cmd = dsh_command() + ["--profile", profile, "headless", "--json", "-"]
+    cmd = dsh_command() + ["--profile", profile, "--json", "-"]
     t0 = time.time()
     with open(stream_path, "wb") as out, open(err_path, "wb") as err:
         proc = subprocess.Popen(
