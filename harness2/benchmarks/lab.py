@@ -1112,7 +1112,7 @@ class LabAdapter:
         lab_skills = {
             p.parent.name for p in (config.lab_repo() / "harness" / "skills").glob("*/SKILL.md")
         }
-        for name in sorted(HT.skill_names(DSH.DSH_SURFACE, tree) & lab_skills):
+        for name in sorted(set(HT.skill_names(DSH.DSH_SURFACE, tree)) & lab_skills):
             errs.append(
                 f"skills/{name}/SKILL.md: `{name}` is a runtime-provided skill manual in this "
                 f"environment; give a new skill a different name instead of replacing it"
