@@ -21,7 +21,7 @@ import shutil
 import subprocess
 
 from . import config
-from .install import PATCHES, missing_runners
+from .install import _patch_files, missing_runners
 from .substrate.opencode import OpencodeSubstrate
 
 
@@ -68,7 +68,8 @@ def check(adapter, *, judge=False) -> list[str]:
                     errors.append(f"{dependency}: checkout differs from the supported pin")
             except subprocess.CalledProcessError:
                 errors.append(f"{dependency}: cannot read checkout revision")
-        patch = config.THIRD_PARTY / "patches" / PATCHES[dependency]
+        # Patches stack in order, so the last one reverse-applying means all are in place.
+        patch = config.THIRD_PARTY / "patches" / _patch_files(dependency)[-1]
         probe(
             f"{dependency} patch",
             ["git", "-C", target, "apply", "--reverse", "--check", patch],

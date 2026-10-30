@@ -202,6 +202,27 @@ def dsh_env(
     return env
 
 
+def credential(name: str) -> str:
+    """A named secret from DSH's local credential store (`refs:` section), or "".
+
+    Only for handing a key to a child process's environment; never log the result.
+    """
+    home = Path(os.environ.get("DSH_HOME") or Path.home() / ".dsh")
+    try:
+        text = (home / ".credentials.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    in_refs = False
+    for ln in text.splitlines():
+        if not ln.startswith(" "):
+            in_refs = ln.rstrip() == "refs:"
+            continue
+        m = re.match(r"^\s+([^:\s]+):\s*(.+?)\s*$", ln)
+        if in_refs and m and m.group(1) == name:
+            return m.group(2).strip("'\"")
+    return ""
+
+
 def run_headless(
     prompt: str,
     cwd: Path,
@@ -210,15 +231,20 @@ def run_headless(
     *,
     timeout: int,
     profile: str = PROFILE,
+    session_id: str | None = None,
 ) -> tuple[int, float, str]:
     """One headless DSH turn: events to `stream_path`; returns (rc, wall seconds, stderr tail).
 
-    On a wall timeout the whole process tree is killed (the launcher is a shim over node) and
-    the rc is -1; whatever the stream holds by then is the rollout's record.
+    `session_id` continues a persisted session instead of starting one. On a wall timeout the
+    whole process tree is killed (the launcher is a shim over node) and the rc is -1;
+    whatever the stream holds by then is the rollout's record.
     """
     stream_path.parent.mkdir(parents=True, exist_ok=True)
     err_path = stream_path.with_suffix(".stderr.log")
-    cmd = dsh_command() + ["--profile", profile, "--json", "-"]
+    cmd = dsh_command() + ["--profile", profile, "--json"]
+    if session_id:
+        cmd += ["--session-id", session_id]
+    cmd.append("-")
     t0 = time.time()
     with open(stream_path, "wb") as out, open(err_path, "wb") as err:
         proc = subprocess.Popen(
@@ -414,6 +440,14 @@ def final_text(path: Path) -> str:
     return text
 
 
+def session_id(path: Path) -> str:
+    """The persisted session id the stream announced, or ""."""
+    for ev in iter_events(path):
+        if ev.get("type") == "session" and isinstance(ev.get("sessionId"), str):
+            return ev["sessionId"]
+    return ""
+
+
 def completed(path: Path) -> bool:
     """Whether the stream records a turn that ended by completing."""
     for ev in iter_events(path):
@@ -443,6 +477,7 @@ __all__ = [
     "STREAM_NAME",
     "DshSubstrate",
     "compose_agents_md",
+    "credential",
     "completed",
     "dsh_env",
     "dsh_tree_problems",
@@ -450,5 +485,6 @@ __all__ = [
     "install_scripts",
     "render_events",
     "run_headless",
+    "session_id",
     "token_usage",
 ]

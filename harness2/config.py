@@ -129,7 +129,7 @@ def lab_repo() -> Path:
 
 OPENCODE_DIR = DEPENDENCIES / "opencode"
 BUN = DEPENDENCIES / "tools" / "node_modules" / ".bin" / "bun"
-LAB_PYTHON = lab_repo() / ".venv" / "bin" / "python"
+LAB_PYTHON = lab_repo() / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 LAB_JUDGE_MODEL = (
     "vertex/" + JUDGE_MODEL if JUDGE_MODEL.startswith(("claude", "gemini")) else JUDGE_MODEL
 )

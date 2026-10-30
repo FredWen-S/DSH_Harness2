@@ -30,7 +30,11 @@ from . import config
 PATCHES = {
     "opencode": "opencode-compat.diff",
     "job-bench-eval": "job-bench-eval-judge.diff",
-    "harvey-labs": "harvey-labs-judge-vertex-anthropic.diff",
+    "harvey-labs": (
+        "harvey-labs-judge-vertex-anthropic.diff",
+        # An OpenAI-compatible chat judge (`compat/<model>`), used by the DSH cell.
+        "harvey-labs-judge-openai-compat.diff",
+    ),
     "workbuddy-bench": "workbuddy-bench-runtime.diff",
 }
 
@@ -47,7 +51,7 @@ def missing_runners() -> str:
     A copy of the code without third-party material still runs the demo and tests, but
     setup needs these files to install a benchmark.
     """
-    need = [config.THIRD_PARTY / "patches" / name for name in PATCHES.values()]
+    need = [config.THIRD_PARTY / "patches" / name for name in _patch_files()]
     need += [config.THIRD_PARTY / name for name in RUNNERS]
     absent = [path for path in need if not path.exists()]
     if not absent:
@@ -103,9 +107,23 @@ def clone(name: str, *, dry_run=False):
     run(["git", "-C", repo, "checkout", "--detach", "FETCH_HEAD"], dry_run=dry_run)
 
 
+def _patch_files(name: str | None = None) -> list[str]:
+    """Patch file names in apply order, for one dependency or for all of them."""
+    out = []
+    for key, files in PATCHES.items():
+        if name is None or key == name:
+            out += [files] if isinstance(files, str) else list(files)
+    return out
+
+
 def patch(name: str, *, dry_run=False):
+    for file in _patch_files(name):
+        _apply(name, file, dry_run=dry_run)
+
+
+def _apply(name: str, file: str, *, dry_run=False):
     repo = config.DEPENDENCIES / name
-    source = config.THIRD_PARTY / "patches" / PATCHES[name]
+    source = config.THIRD_PARTY / "patches" / file
     if dry_run:
         run(["git", "-C", repo, "apply", "--check", source], dry_run=True)
         run(["git", "-C", repo, "apply", source], dry_run=True)

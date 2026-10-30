@@ -210,8 +210,9 @@ def _check_identity(adapter, args, namespace_dir: Path) -> None:
     """Prevent a resumed run or library from silently mixing models or task partitions."""
     identity = {
         "method_version": config.METHOD_VERSION,
-        "executor": config.SOLVER_MODEL_OC if args.substrate == "oc" else config.SOLVER_MODEL_CX,
-        "improver": config.IMPROVER_MODEL,
+        "executor": getattr(adapter, "model", "")
+        or (config.SOLVER_MODEL_OC if args.substrate == "oc" else config.SOLVER_MODEL_CX),
+        "improver": adapter.spec.channels["proposer"].model or config.IMPROVER_MODEL,
         "judge": config.JUDGE_MODEL,
         "project": config.VERTEX_PROJECT,
         "location": config.VERTEX_REGION,

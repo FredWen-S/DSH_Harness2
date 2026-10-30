@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from dataclasses import replace
 from functools import cache
 from pathlib import Path
@@ -35,8 +36,10 @@ from .._compat import SIGKILL, kill_group
 from ..core import runmark as RM
 from ..core import tree as HT
 from ..core.spec import BenchPrompts, BenchSpec, resolve_channel_model
+from ..substrate import dsh as DSH
 from ..substrate.base import Install, RunRequest
 from ..substrate.codex import CODEX_SURFACE, CodexSubstrate
+from ..substrate.dsh import DshSubstrate
 from ..substrate.opencode import OPENCODE_SURFACE, OpencodeSubstrate
 from .tasks import discover, select
 
@@ -389,10 +392,107 @@ except Exception as exc:
 def _lab_env() -> dict[str, str]:
     return {
         **os.environ,
+        # Children print document text; without UTF-8 mode a Windows console codec mangles it.
+        "PYTHONUTF8": "1",
         "PYTHONPATH": str(config.lab_repo()),
-        "PATH": f"{config.LAB_PYTHON.parent}:{config.BUN.parent}:{config.CODEX_DIST}/codex-path:"
-        + os.environ.get("PATH", ""),
+        # pandoc is on PATH for every LAB child: the judge and the deliverable extractor read
+        # .docx through it, and a missing binary reads as "file not found", i.e. a silent 0.
+        "PATH": os.pathsep.join(
+            p
+            for p in (
+                str(config.LAB_PYTHON.parent),
+                str(config.BUN.parent),
+                f"{config.CODEX_DIST}/codex-path",
+                _pandoc_dir(),
+                os.environ.get("PATH", ""),
+            )
+            if p
+        ),
     }
+
+
+_READ_DOC = config.THIRD_PARTY / "lab_runner" / "opencode" / "scripts" / "read_doc.py"
+
+_NUDGE = (
+    "Continue the assignment to completion now. Do not ask for confirmation. "
+    "If every deliverable has already been written to the output directory, "
+    "reply with exactly: DONE"
+)
+
+# DSH mounts PowerShell, not bash, as the shell tool on Windows hosts.
+DSH_SHELL_TOOL = "pwsh" if os.name == "nt" else "bash"
+
+DSH_ENV_DELTA = """\
+You are running under DeepSeek Harness. Three details differ from the description
+above -- where they conflict, **these win**:
+
+1. **Paths are real and absolute; the shell tool is `{shell}`.** It starts in the
+   workspace root, whose absolute path is given in the assignment. `documents/`,
+   `output/`, `scripts/` and `skills/` are subdirectories of it. There is no path
+   rewriting and no `$WORKSPACE_DIR`-style variable; use the absolute paths. Where the
+   description above says `bash`, use `{shell}`.
+
+2. **Deliverables are not auto-routed.** Relative `write`/`edit` paths land
+   wherever the tool resolves them, *not* in `output/`. Every deliverable must
+   be written to `output/<filename>` explicitly (or to its absolute path).
+   Anything left outside `output/` is not graded.
+
+3. **`read` does not parse binary documents.** For `.docx`, `.pdf`, `.pptx`,
+   and `.xlsx`, run:
+
+       python scripts/read_doc.py <path>
+
+   which prints the extracted text. `read` is still the right tool for plain
+   text, markdown, and code. The file-type manuals (`docx`, `xlsx`, `pptx`) load
+   through the `skill` tool.
+"""
+
+
+def _pandoc_dir() -> str:
+    """The directory holding pandoc: PATH first, else the LAB venv's bundled binary."""
+    found = shutil.which("pandoc")
+    if found:
+        return str(Path(found).parent)
+    site = config.LAB_PYTHON.parent.parent / ("Lib" if os.name == "nt" else "lib")
+    for p in site.rglob("pypandoc/files/pandoc*"):
+        if p.is_file():
+            return str(p.parent)
+    return ""
+
+
+def _judge_env(judge_model: str) -> dict[str, str]:
+    """The judge's environment. A `compat/<model>` judge reads its endpoint from
+    HARNESS2_JUDGE_BASE_URL (default: OpenCode Go) and its key from HARNESS2_JUDGE_API_KEY,
+    else from the DSH credential store; neither is written anywhere."""
+    env = _lab_env()
+    if not judge_model.startswith("compat/"):
+        return env
+    base = os.environ.get("HARNESS2_JUDGE_BASE_URL") or "https://opencode.ai/zen/go/v1"
+    key = os.environ.get("HARNESS2_JUDGE_API_KEY") or DSH.credential("OPENCODE_GO_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "compat judge has no key: set HARNESS2_JUDGE_API_KEY or store OPENCODE_GO_API_KEY "
+            "in DSH (the Models page)"
+        )
+    headers = json.loads(os.environ.get("HARNESS2_JUDGE_HEADERS") or "{}")
+    if "opencode.ai" in base:
+        # OpenCode Go routes by session and rejects requests without one.
+        headers.setdefault("x-opencode-session", str(uuid.uuid4()))
+    env.update(
+        HARNESS2_JUDGE_BASE_URL=base,
+        HARNESS2_JUDGE_API_KEY=key,
+        HARNESS2_JUDGE_HEADERS=json.dumps(headers),
+    )
+    return env
+
+
+def _dsh_lab_env() -> dict[str, str]:
+    """A rollout's environment: `python` is the LAB interpreter (its document parsers and
+    the skill helpers' dependencies), documents parse on the host, output is UTF-8."""
+    env = _lab_env()
+    env["LAB_DOC_PARSER"] = "host"
+    env["LAB_BENCH_ROOT"] = str(config.lab_repo())
+    return env
 
 
 def _json_or_none(p: Path) -> dict | None:
@@ -440,6 +540,7 @@ def _opencode_base_body(skill_mode: str) -> str:
             env=_lab_env(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=300,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -477,19 +578,28 @@ def _require_runtime_scripts() -> frozenset[str]:
 
 def lab_spec(substrate_name: str) -> BenchSpec:
     """The LAB BenchSpec for one substrate cell. A value, not a code path."""
-    if substrate_name not in ("oc", "cx"):
-        raise ValueError(f"substrate must be 'oc' or 'cx', got {substrate_name!r}")
-    channel = resolve_channel_model(None, None, effort="high")
+    if substrate_name not in ("oc", "cx", "dsh"):
+        raise ValueError(f"substrate must be 'oc', 'cx' or 'dsh', got {substrate_name!r}")
+    if substrate_name == "dsh":
+        channel = resolve_channel_model("dsh", config.DSH_IMPROVER_MODEL, effort="high")
+    else:
+        channel = resolve_channel_model(None, None, effort="high")
+    install_mode = {"oc": "workspace_config", "cx": "codex_root", "dsh": DSH.INSTALL_MODE}
+    reserved = frozenset()
+    if substrate_name == "oc":
+        reserved = _runtime_scripts()
+    elif substrate_name == "dsh":
+        reserved = _runtime_scripts() | {"read_doc.py"}
     return BenchSpec(
         name="lab",
         runs_root=config.RUNS / "lab",
-        install_mode="workspace_config" if substrate_name == "oc" else "codex_root",
+        install_mode=install_mode[substrate_name],
         prompts=LAB_BASE,
         channels={"proposer": channel, "selector": channel},
         domain_word="practice area",
         leak_globs=("task.json",),
         allow_subagents=False,
-        reserved_scripts=_runtime_scripts() if substrate_name == "oc" else frozenset(),
+        reserved_scripts=reserved,
         proposer_deliverables="contents",
         obs_trunc=50_000,
     )
@@ -522,6 +632,10 @@ class LabAdapter:
             self.substrate = OpencodeSubstrate(launcher=self._launch_oc)
             self.model = model or config.SOLVER_MODEL_OC
             self._results_root = config.RUNS / "lab" / "results" / "oc"
+        elif substrate == "dsh":
+            self.substrate = DshSubstrate(launcher=self._launch_dsh)
+            self.model = model or DSH.SOLVER_MODEL
+            self._results_root = config.RUNS / "lab" / "results" / "dsh"
         else:
             self.substrate = CodexSubstrate(launcher=self._launch_cx)
             self.model = model or config.SOLVER_MODEL_CX
@@ -734,6 +848,127 @@ class LabAdapter:
             dirs.append(self._run_dir(run_id))
         return dirs
 
+    def _launch_dsh(self, req: RunRequest, install: Install) -> list[Path]:
+        """One DSH rollout per run id, laid out like `run_opencode.py` so `run_eval` scores it
+        unchanged: results/<run_id>/{workspace,output,metrics.json,config.json}."""
+        task = self._task_json(req.task_ref)
+        dirs = []
+        for run_id in req.run_ids:
+            results_dir = self._run_dir(run_id)
+            dirs.append(results_dir)
+            staged = install
+            if install.extras.get("harness") == "base":
+                # Base is staged like any harness so runtime files never touch the shared tree.
+                fresh = self.substrate.materialise(self.base_harness(), self.spec, {})
+                staged = replace(fresh, extras={**fresh.extras, "harness": "base"})
+            try:
+                self._run_dsh(req, task, run_id, results_dir, staged)
+            finally:
+                if staged is not install:
+                    shutil.rmtree(staged.staging_dir, ignore_errors=True)
+        return dirs
+
+    def _run_dsh(
+        self, req: RunRequest, task: dict, run_id: str, results_dir: Path, staged: Install
+    ) -> None:
+        workspace = results_dir / "workspace"
+        output_dir = workspace / "output"
+        docs = workspace / "documents"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(config.lab_repo() / "tasks" / req.task_ref / "documents", docs)
+        for p in docs.rglob("*"):
+            if p.is_file():
+                p.chmod(0o444)
+        (workspace / "scripts").mkdir(exist_ok=True)
+        shutil.copy2(_READ_DOC, workspace / "scripts" / "read_doc.py")
+        # The base skill manuals are runtime, not harness: catalogued from the staged skills
+        # root, their helpers at the workspace path the manuals name.
+        lab_skills = config.lab_repo() / "harness" / "skills"
+        for skill in sorted(p.parent for p in lab_skills.glob("*/SKILL.md")):
+            shutil.copytree(
+                skill, Path(staged.staging_dir) / "skills" / skill.name, dirs_exist_ok=True
+            )
+            if (skill / "scripts").is_dir():
+                shutil.copytree(
+                    skill / "scripts",
+                    workspace / "skills" / skill.name / "scripts",
+                    dirs_exist_ok=True,
+                )
+        DSH.install_scripts(staged, workspace)
+        agents = Path(staged.staging_dir) / "AGENTS.md"
+        agents.write_text(
+            agents.read_text(encoding="utf-8").rstrip()
+            + "\n\n---\n\n"
+            + DSH_ENV_DELTA.replace("{shell}", DSH_SHELL_TOOL),
+            encoding="utf-8",
+        )
+        env = self.substrate.run_env(_dsh_lab_env(), staged, self.model)
+        prompt = (
+            f"=== WORKSPACE ===\n{workspace}\n\n"
+            f"=== DOCUMENTS (read-only) ===\n{docs}\n\n"
+            f"=== OUTPUT DIRECTORY (deliverables go here) ===\n{output_dir}\n\n"
+            f"=== ASSIGNMENT ===\n{task['instructions']}"
+        )
+        stream = results_dir / DSH.STREAM_NAME
+        rc, wall, tail = DSH.run_headless(prompt, workspace, env, stream, timeout=req.timeout)
+        nudges = 0
+        while nudges < 2 and rc == 0 and not any(p.is_file() for p in output_dir.rglob("*")):
+            sid = DSH.session_id(stream)
+            remaining = req.timeout - wall
+            if not sid or remaining < 60:
+                break
+            nudges += 1
+            more = stream.with_name(f"dsh_session.nudge{nudges}.jsonl")
+            rc, w, tail = DSH.run_headless(
+                _NUDGE, workspace, env, more, timeout=int(remaining), session_id=sid
+            )
+            wall += w
+            with stream.open("ab") as fh:
+                fh.write(more.read_bytes())
+            more.unlink()
+        graded = results_dir / "output"
+        graded.mkdir(parents=True, exist_ok=True)
+        for src in output_dir.rglob("*"):
+            if src.is_file():
+                dest = graded / src.relative_to(output_dir)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+        usage = DSH.token_usage(stream)
+        config_json = {
+            "runner": "dsh",
+            "model": self.model,
+            "task": req.task_ref,
+            "run_id": run_id,
+            "profile": DSH.PROFILE,
+            "harness": staged.extras.get("harness", "staged"),
+            "nudges": nudges,
+        }
+        (results_dir / "config.json").write_text(
+            json.dumps(config_json, indent=2), encoding="utf-8"
+        )
+        if usage["steps"] == 0 and not DSH.final_text(stream):
+            # Mirrors run_opencode.py: no parseable events means a dead chain, which must
+            # not be cached as a rollout. execute() raises on the missing metrics.json.
+            (results_dir / "dsh_stderr_tail.txt").write_text(tail, encoding="utf-8")
+            return
+        metrics = {
+            "runner": "dsh",
+            "model": self.model,
+            "task": req.task_ref,
+            "run_id": run_id,
+            "turn_count": usage["steps"],
+            "input_tokens": usage["input"],
+            "output_tokens": usage["output"],
+            "cache_read_tokens": usage["cache_read"],
+            "total_tokens": usage["input"] + usage["output"],
+            "wall_clock_seconds": wall,
+            "cost_usd": 0.0,
+            "finished_cleanly": rc == 0 and DSH.completed(stream),
+            "exit_code": rc,
+            "tool_calls": sum(1 for e in DSH.iter_events(stream) if e.get("type") == "tool_call"),
+        }
+        (results_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
     def _safe_rmtree(self, d: Path) -> None:
         """rm -rf restricted to this cell's results root — a guard, not a convenience."""
         d = Path(d).resolve()
@@ -759,7 +994,9 @@ class LabAdapter:
 
     def trajectory(self, run_dir: Path, *, obs_trunc: int) -> str:
         """The substrate's ONE renderer over the raw session stream, effectively uncapped."""
-        name = "opencode_session.jsonl" if self.substrate.name == "oc" else "codex_session.jsonl"
+        name = {"oc": "opencode_session.jsonl", "dsh": DSH.STREAM_NAME}.get(
+            self.substrate.name, "codex_session.jsonl"
+        )
         stream = Path(run_dir) / name
         if not stream.is_file():
             return f"(no trajectory recorded for {Path(run_dir).name})"
@@ -784,6 +1021,7 @@ class LabAdapter:
                 env=_lab_env(),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=600,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -822,6 +1060,8 @@ class LabAdapter:
         pid: the domain threads of one sweep share the path."""
         if self.substrate.name == "oc":
             d = self.spec.runs_root / f"_base_harness_{self.skill_mode}_{os.getpid()}"
+        elif self.substrate.name == "dsh":
+            d = self.spec.runs_root / f"_base_harness_dsh_{os.getpid()}"
         else:
             d = self.spec.runs_root / f"_base_harness_cx_{os.getpid()}"
         with _BASE_LOCK:
@@ -831,6 +1071,19 @@ class LabAdapter:
                         OPENCODE_SURFACE,
                         {
                             "systemprompt.md": _opencode_base_body(self.skill_mode),
+                            "guardrails.md": "",
+                            "LongTermMEMORY.md": "",
+                            "tool_descriptions/tool_guidance.md": "",
+                        },
+                        d,
+                    )
+                elif self.substrate.name == "dsh":
+                    HT.write_tree(
+                        DSH.DSH_SURFACE,
+                        {
+                            # The same native-skill body the oc cell starts from; the DSH
+                            # environment delta is runtime, appended at launch.
+                            "systemprompt.md": _opencode_base_body("native"),
                             "guardrails.md": "",
                             "LongTermMEMORY.md": "",
                             "tool_descriptions/tool_guidance.md": "",
@@ -847,8 +1100,25 @@ class LabAdapter:
         via scripts/read_doc.py. oc checks the RENDERED prompt, cx the AGENTS.md body."""
         if self.substrate.name == "oc":
             self._validate_oc(tree)
+        elif self.substrate.name == "dsh":
+            self._validate_dsh(tree)
         else:
             self._validate_cx(tree)
+
+    def _validate_dsh(self, tree: dict[str, str]) -> None:
+        """The output/ and read_doc.py rules live in the runtime delta, so only the surface
+        rules and the runtime-owned skill names can be broken here."""
+        errs = DSH.dsh_tree_problems(tree)
+        lab_skills = {
+            p.parent.name for p in (config.lab_repo() / "harness" / "skills").glob("*/SKILL.md")
+        }
+        for name in sorted(HT.skill_names(DSH.DSH_SURFACE, tree) & lab_skills):
+            errs.append(
+                f"skills/{name}/SKILL.md: `{name}` is a runtime-provided skill manual in this "
+                f"environment; give a new skill a different name instead of replacing it"
+            )
+        if errs:
+            raise ValueError(" | ".join(errs))
 
     def _validate_oc(self, tree: dict[str, str]) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -860,6 +1130,7 @@ class LabAdapter:
                     env=_lab_env(),
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=300,
                 )
                 got = json.loads(r.stdout)
@@ -938,6 +1209,14 @@ class LabAdapter:
         if self.substrate.name == "oc":
             _require_runner(config.lab_repo() / "opencode" / "run_opencode.py")
             _require_runtime_scripts()
+        elif self.substrate.name == "dsh":
+            _require_runner(config.lab_repo() / "opencode" / "render.py")
+            _require_runtime_scripts()
+            if not _pandoc_dir():
+                raise RuntimeError(
+                    "pandoc not found (the docx reader needs it): install pandoc, or "
+                    f"`uv pip install --python {config.LAB_PYTHON} pypandoc_binary`"
+                )
         else:
             _require_runner(config.lab_repo() / "external" / "adapt_runs_cx" / "run_codex_lab.py")
         try:
@@ -947,6 +1226,7 @@ class LabAdapter:
                 env=_lab_env(),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=120,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -982,7 +1262,7 @@ class LabAdapter:
                     run_detached(
                         cmd,
                         cwd=config.lab_repo(),
-                        env=_lab_env(),
+                        env=_judge_env(self.judge_model),
                         stdin=subprocess.DEVNULL,
                         stdout=out,
                         stderr=subprocess.STDOUT,

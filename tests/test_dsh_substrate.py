@@ -214,6 +214,35 @@ class DshChannelTests(unittest.TestCase):
             "Keep both signs.", (reply.workspace / "systemprompt.md").read_text(encoding="utf-8")
         )
 
+    def test_continuation_passes_the_session_id_before_stdin(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fake = tmp / "argv_dsh.py"
+        fake.write_text(
+            "import json, sys\nsys.stdin.read()\nprint(json.dumps({'argv': sys.argv[1:]}))\n",
+            encoding="utf-8",
+        )
+        stream = tmp / "s.jsonl"
+        with patch.object(DSH, "dsh_command", return_value=[sys.executable, str(fake)]):
+            rc, _, _ = DSH.run_headless("go on", tmp, {}, stream, timeout=60, session_id="s-1")
+        self.assertEqual(rc, 0)
+        argv = json.loads(stream.read_text(encoding="utf-8"))["argv"]
+        self.assertEqual(argv, ["--profile", DSH.PROFILE, "--json", "--session-id", "s-1", "-"])
+
+
+class DshCredentialTests(unittest.TestCase):
+    def test_reads_only_the_refs_section(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / ".credentials.yaml").write_text(
+            "version: 1\nrecords:\n  OPENCODE_GO_API_KEY:\n    kind: grant\n"
+            "refs:\n  OTHER: nope\n  OPENCODE_GO_API_KEY: 'sk-test'\n",
+            encoding="utf-8",
+        )
+        with patch.dict("os.environ", {"DSH_HOME": str(tmp)}):
+            self.assertEqual(DSH.credential("OPENCODE_GO_API_KEY"), "sk-test")
+            self.assertEqual(DSH.credential("MISSING"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
