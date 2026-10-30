@@ -10,6 +10,33 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-34A853" alt="License"></a>
 </p>
 
+> [!NOTE]
+> **This fork runs Harness² on [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness).**
+> 本仓库在官方 Harness² 框架上新增了 DSH 执行端，方法本身未改动。
+>
+> It adds DSH as a third solver substrate (`--substrate dsh`) and improver channel next to
+> OpenCode and Codex, a LAB benchmark cell on DSH with an OpenAI-compatible judge, and
+> Windows support. The method — recursion, stage prompts, the 4k/3k budget ledger,
+> selection, reflection, the library — is the released code; only a DSH surface description
+> is added to the prompts. Full details: **[docs/DSH.md](docs/DSH.md)**.
+>
+> ```bash
+> dsh --profile h2 --from-default-profile headless --help    # once: create the DSH profile
+> cp docs/dsh-h2.patch.yml ~/.dsh/profiles/h2/cordis.patch.yml
+> uv venv --python 3.12 .venv && uv pip install -e '.[render]'
+> harness2-dsh-demo --output runs/dsh-demo --k 1             # live end-to-end check
+> ```
+>
+> **Status: engineering port, not yet a validated reproduction.** No improvement over the
+> base harness is claimed. Known differences from the paper's setup: no c8 (DSH cannot load
+> per-run tool-loop middleware), subagents are role prompts rather than presets, executor and
+> improver share one model, and the LAB judge is an OpenCode Go model rather than the
+> paper's Vertex judge, so scores are not comparable with the paper's tables. DSH's Windows
+> sandbox does not confine reads; access to ground-truth paths is detected and flagged rather
+> than prevented (see [Isolation](docs/DSH.md#isolation)).
+>
+> The original project README follows.
+
 <p align="center">
   <a href="docs/BENCHMARKS.md#jobbench">
     <img src="assets/harness2-setup.gif" alt="Install, set up, and run JobBench: uv pip install -e '.[render]', harness2-setup jb, then harness2 --bench jb --k 1 --mode parallel. Click for prerequisites and commands." width="640">
