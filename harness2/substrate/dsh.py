@@ -231,6 +231,8 @@ def forbidden_needles(extra: tuple[str, ...] = ()) -> list[str]:
 def forbidden_touches(path: Path, needles: list[str]) -> list[str]:
     """Tool calls or results in a stream that mention a forbidden path (case-insensitive).
 
+    Needles should be absolute directory paths; separators are normalised on both sides.
+
     DSH's Windows sandbox leaves reads unconfined, so ground truth on the host is reachable;
     this is the detection that stands in for a read boundary.
     """
@@ -270,9 +272,19 @@ def split_model(model: str) -> tuple[str, str]:
 
 
 def dsh_env(
-    base_env: Mapping[str, str], *, agents_home: Path, skills_dir: Path | None, model: str
+    base_env: Mapping[str, str],
+    *,
+    agents_home: Path,
+    skills_dir: Path | None,
+    model: str,
+    effort: str = "high",
 ) -> dict[str, str]:
-    """The per-run variables the `h2` profile reads; see the profile's patch layer."""
+    """The per-run variables the `h2` profile reads; see the profile's patch layer.
+
+    `effort` is the reasoning effort DSH validates against the model (DeepSeek V4 Pro on
+    OpenCode Go accepts `high`). DSH has no per-run step cap, so `ChannelSpec.steps` has no
+    counterpart here.
+    """
     provider, name = split_model(model)
     env = dict(base_env)
     env["DSH_AGENTS_HOME"] = str(agents_home)
@@ -282,6 +294,7 @@ def dsh_env(
         env.pop("H2_SKILLS_DIR", None)
     env["H2_PROVIDER"] = provider
     env["H2_MODEL"] = name
+    env["H2_EFFORT"] = effort
     env.setdefault("DSH_PERMISSION_MODE", "workspace-write")
     env.setdefault("HOME", str(Path.home()))
     return env
@@ -396,10 +409,14 @@ class DshSubstrate:
             extras={"install_mode": INSTALL_MODE},
         )
 
-    def run_env(self, base_env: Mapping[str, str], install: Install, model: str) -> dict:
+    def run_env(
+        self, base_env: Mapping[str, str], install: Install, model: str, effort: str = "high"
+    ) -> dict:
         """The environment for one rollout of `install` under `model` (provider/model)."""
         staged = Path(install.staging_dir)
-        return dsh_env(base_env, agents_home=staged, skills_dir=staged / "skills", model=model)
+        return dsh_env(
+            base_env, agents_home=staged, skills_dir=staged / "skills", model=model, effort=effort
+        )
 
     def execute(
         self, task_ref: str, install: Install, run_ids: list[str], timeout: int

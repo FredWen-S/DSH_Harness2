@@ -98,8 +98,9 @@ BASE_SYSTEM = (
     "tools available and save the requested output where the task says.\n"
 )
 
-# The module holding the expected totals and the reports derived from them.
-_FORBIDDEN = ("dsh_demo.py", "dsh_demo.json", "dsh_demo.md", "scores.json")
+# This module (it holds the expected totals) and the package around it, as a path: a bare
+# file name would also match prose that merely mentions it.
+_FORBIDDEN = (str(Path(__file__).resolve().parent),)
 
 _TOTAL = re.compile(r"Total:\s*(-?[0-9]+\.[0-9]{2})\s*$")
 
