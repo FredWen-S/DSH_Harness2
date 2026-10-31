@@ -84,8 +84,17 @@ def main(argv=None) -> int:
         metavar=("IN", "CACHE", "OUT"),
         help="$ per 1M input / cache-read / output",
     )
+    p.add_argument(
+        "--drop",
+        nargs="*",
+        default=[],
+        metavar="NS:TASK",
+        help="pairs left out of the statistics (still listed and costed), e.g. a pair whose "
+        "improver sessions were discarded; TASK is the name without its domain",
+    )
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args(argv)
+    drop = {tuple(d.split(":", 1)) for d in args.drop}
     pairs, judges, flagged = [], set(), []
     usage = {"input": 0, "cache_read": 0, "output": 0}
     imp_usage, imp_streams = {"input": 0, "cache_read": 0, "output": 0}, 0
@@ -116,16 +125,23 @@ def main(argv=None) -> int:
                     "final": f,
                     "final_is_base_tree": final.get("tree_is_base"),
                     "lesson": final.get("lesson", ""),
+                    "dropped": (ns, row["task_id"].split("/", 1)[1]) in drop,
                 }
             )
     if len(judges) != 1:
         print(f"refusing to pool across judges: {judges}")
         return 1
-    done = [x for x in pairs if x["base"] is not None and x["final"] is not None]
+    unknown = drop - {(x["namespace"], x["task"]) for x in pairs}
+    if unknown:
+        print(f"--drop names no pair: {sorted(unknown)}")
+        return 1
+    scored = [x for x in pairs if x["base"] is not None and x["final"] is not None]
+    done = [x for x in scored if not x["dropped"]]
     diffs = [x["final"] - x["base"] for x in done]
     print(f"{'task':58s} {'ns':18s} base   final  diff")
-    for x in done:
+    for x in scored:
         tag = " (base tree)" if x["final_is_base_tree"] else ""
+        tag += " [dropped]" if x["dropped"] else ""
         print(
             f"{x['task'][:58]:58s} {x['namespace']:18s} {x['base']:.3f}  "
             f"{x['final']:.3f}  {x['final'] - x['base']:+.3f}{tag}"
