@@ -30,14 +30,14 @@
 > **Status: engineering port, not yet a validated reproduction.** No improvement over the
 > base harness is claimed. On three LAB employment-law tasks × three seeds (k=1, parallel;
 > executor and improver DeepSeek V4 Pro, judge GPT 6 Luna), the refined harness scored a
-> mean criterion pass rate of 85.8% against 85.4% for the base harness: paired difference
-> +0.4 points, bootstrap 95% CI [−2.0, +2.7], 5 wins / 3 losses / 1 tie, sign-test p = 0.73.
-> The base harness alone varies by up to 10 points on one task across seeds, so this run
-> cannot show an effect of that size. The one tie is not a valid pair: false-positive
-> ground-truth flags (since fixed, `91302bb`) discarded its editor and composer sessions,
-> so it fell back to the base harness; no stream read task criteria or verdicts. The run
-> cost about $10.5 at DeepSeek's off-peak list price ($4.5 rollouts, $6.0 improver
-> sessions). Known differences from the paper's setup: no c8 (DSH cannot load
+> mean criterion pass rate of 85.8% against 85.6% for the base harness: paired difference
+> +0.2 points, bootstrap 95% CI [−2.3, +2.5], 5 wins / 4 losses, sign-test p = 1.0. The
+> base harness alone varies by up to 10 points on one task across seeds, so this run
+> cannot show an effect of that size. One original pair was invalid — false-positive
+> ground-truth flags (since fixed, `91302bb`) discarded its editor and composer sessions —
+> and was rerun with the fix (through OpenCode Go rather than DeepSeek's API, same model);
+> no stream read task criteria or verdicts. The ten runs cost about $12.3 at DeepSeek's
+> off-peak list price, more than half of it in improver sessions. Known differences from the paper's setup: no c8 (DSH cannot load
 > per-run tool-loop middleware), subagents are role prompts rather than presets, executor and
 > improver share one model, and the LAB judge is an OpenCode Go model rather than the
 > paper's Vertex judge, so scores are not comparable with the paper's tables. DSH's Windows
